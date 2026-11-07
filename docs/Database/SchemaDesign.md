@@ -19,8 +19,8 @@
 | `org.ZoneMaster` | `ZoneId` (`int`) | `UX_ZoneMaster_ZoneCode` (`ZoneCode`) | Top-level organisational zone |
 | `org.StateMaster` | `StateId` (`int`) | `UX_StateMaster_StateCode` (`StateCode`), `IX_StateMaster_ZoneId` | State linked to a Zone |
 | `org.RegionMaster` | `RegionId` (`int`) | `UX_RegionMaster_RegionCode` (`RegionCode`), `IX_RegionMaster_StateId` | Region linked to a State |
-| `org.BranchMaster` | `BranchId` (`int`) | `UX_BranchMaster_BranchCode` (`BranchCode`, e.g. `36:01`), `IX_BranchMaster_RegionId` | Operational branch linked to Region, State, and Zone |
-| `org.OrganisationMappingHistory` | `MappingHistoryId` (`bigint`) | `IX_OrganisationMappingHistory_BranchId_EffectiveFromDate` | Effective-dated historical record of branch-to-region/state/zone mapping so past reports remain accurate |
+| `org.BranchMaster` | `BranchId` (`int`) | `UX_BranchMaster_BranchCode` (`BranchCode`, e.g. `36:01`), `IX_BranchMaster_Active_State_Region` | Operational branch linked to Region, State, and Zone (`RowVersion` protected) |
+| `org.OrganisationMappingHistory` | `MappingHistoryId` (`bigint`) | `UX_OrganisationMappingHistory_ActivePerBranch` (filtered unique where `[EffectiveToDate] IS NULL`), `IX_OrganisationMappingHistory_BranchId_EffectiveFromDate` | Effective-dated historical record of branch-to-region/state/zone mapping so past reports remain accurate (`RowVersion` protected) |
 
 ### 2.2 `activity` Schema (Operational Activities & Status Lifecycle)
 | Table | Primary Key | Unique Constraints / Indexes | Purpose |

@@ -65,11 +65,11 @@ Its primary initial objective is to automate the collection, validation, status 
 
 ---
 
-### Phase 3 — Organisation Master *(Pending Approval)*
-- Implement `Zone`, `State`, `Region`, and `Branch` management services in `OpsConnect.Application`.
-- Prepare the Excel hierarchy import pipeline and validation report generator (without inventing real organisation data).
-- Enforce hierarchy validation rules: unique branch codes (e.g., `36:01`), active status checks, invalid mapping rejection, and effective-dated `OrganisationMappingHistory` tracking so historical reports remain immutable.
-- Add unit and integration tests covering valid/invalid organisation imports and hierarchy queries.
+### Phase 3 — Organisation Master *(Completed)*
+- [x] Implement `Zone`, `State`, `Region`, and `Branch` management services in `OpsConnect.Application` and `OpsConnect.Infrastructure`.
+- [x] Prepare the Excel hierarchy import pipeline (`IOrganisationExcelReader`, `OrganisationExcelReader`) and validation report generator (`OrganisationHierarchyImportValidator`) without inventing real organisation data.
+- [x] Enforce hierarchy validation rules: unique branch codes (e.g., `36:01`), active status checks, invalid mapping rejection, and effective-dated `OrganisationMappingHistory` tracking (`UX_OrganisationMappingHistory_ActivePerBranch`) so historical reports remain immutable.
+- [x] Expose secured REST API endpoints (`GET /api/branches`, `GET /api/hierarchy`, `GET /api/branches/{branchCode}/history`, `POST /api/hierarchy/import`) and add comprehensive unit and integration tests.
 
 ### Phase 4 — Activity and RFFO Foundation *(Pending Approval)*
 - Implement generic `ActivityMaster` management and pluggable activity handlers (`IActivityUpdateHandler`).

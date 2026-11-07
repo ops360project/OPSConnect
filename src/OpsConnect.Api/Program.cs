@@ -1,10 +1,22 @@
+using Microsoft.AspNetCore.Authentication;
+using OpsConnect.Api.Authentication;
 using OpsConnect.Application;
 using OpsConnect.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
+builder.Services.AddProblemDetails();
 builder.Services.AddOpenApi();
+
+builder.Services
+    .AddAuthentication(OpsConnectAuthenticationHandler.SchemeName)
+    .AddScheme<AuthenticationSchemeOptions, OpsConnectAuthenticationHandler>(
+        OpsConnectAuthenticationHandler.SchemeName,
+        _ => { });
+
+builder.Services.AddAuthorization(AuthorizationPolicies.ConfigurePolicies);
+
 builder.Services.AddApplicationServices();
 builder.Services.AddInfrastructureServices(builder.Configuration);
 
@@ -21,6 +33,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 
