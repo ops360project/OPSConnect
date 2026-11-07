@@ -1,7 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using OpsConnect.Application.Organisation;
 using OpsConnect.Infrastructure.Persistence;
+using OpsConnect.Infrastructure.Services;
 
 namespace OpsConnect.Infrastructure;
 
@@ -29,6 +31,8 @@ public static class DependencyInjection
                     errorNumbersToAdd: null);
             });
         });
+
+        services.AddSingleton<IOrganisationExcelReader, OrganisationExcelReader>();
 
         return services;
     }
