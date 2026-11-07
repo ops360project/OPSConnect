@@ -33,6 +33,7 @@ public static class DependencyInjection
         });
 
         services.AddSingleton<IOrganisationExcelReader, OrganisationExcelReader>();
+        services.AddScoped<IOrganisationMasterService, OrganisationMasterService>();
 
         return services;
     }
