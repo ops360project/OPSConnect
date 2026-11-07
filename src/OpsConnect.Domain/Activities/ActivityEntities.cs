@@ -47,6 +47,69 @@ public class ActivityMaster : ActivatableAuditableEntity
     public ICollection<ActivityStatus> ActivityStatuses { get; set; } = new List<ActivityStatus>();
     public ICollection<ActivityHistory> ActivityHistories { get; set; } = new List<ActivityHistory>();
     public ICollection<StatusReopenPermission> ReopenPermissions { get; set; } = new List<StatusReopenPermission>();
+
+    public static ActivityMaster Create(
+        string activityCode,
+        string activityName,
+        string? description = null,
+        string? configurationJson = null,
+        bool isActive = true,
+        string? createdBy = null,
+        DateTime? createdAtUtc = null)
+    {
+        var normalizedCode = ValidateActivityCode(activityCode);
+        var normalizedName = OrganisationCodeNormalizer.NormalizeName(activityName, nameof(activityName));
+
+        return new ActivityMaster
+        {
+            ActivityCode = normalizedCode,
+            ActivityName = normalizedName,
+            Description = string.IsNullOrWhiteSpace(description) ? null : description.Trim(),
+            ConfigurationJson = string.IsNullOrWhiteSpace(configurationJson) ? null : configurationJson.Trim(),
+            IsActive = isActive,
+            CreatedBy = string.IsNullOrWhiteSpace(createdBy) ? null : createdBy.Trim(),
+            CreatedAtUtc = createdAtUtc ?? DateTime.UtcNow
+        };
+    }
+
+    public void UpdateDetails(
+        string activityCode,
+        string activityName,
+        string? description = null,
+        string? configurationJson = null,
+        bool isActive = true,
+        string? updatedBy = null,
+        DateTime? updatedAtUtc = null)
+    {
+        ActivityCode = ValidateActivityCode(activityCode);
+        ActivityName = OrganisationCodeNormalizer.NormalizeName(activityName, nameof(activityName));
+        Description = string.IsNullOrWhiteSpace(description) ? null : description.Trim();
+        ConfigurationJson = string.IsNullOrWhiteSpace(configurationJson) ? null : configurationJson.Trim();
+        IsActive = isActive;
+        UpdatedBy = string.IsNullOrWhiteSpace(updatedBy) ? null : updatedBy.Trim();
+        UpdatedAtUtc = updatedAtUtc ?? DateTime.UtcNow;
+    }
+
+    public static string ValidateActivityCode(string? activityCode)
+    {
+        var normalized = OrganisationCodeNormalizer.NormalizeCode(activityCode, nameof(activityCode));
+        if (normalized.Length > 50)
+        {
+            throw new ArgumentException("ActivityCode cannot exceed 50 characters.", nameof(activityCode));
+        }
+
+        foreach (var ch in normalized)
+        {
+            if (!char.IsAsciiLetterOrDigit(ch) && ch != '_' && ch != '-')
+            {
+                throw new ArgumentException(
+                    $"ActivityCode ('{activityCode}') contains invalid character '{ch}'. Only letters, digits, underscores, and hyphens are allowed.",
+                    nameof(activityCode));
+            }
+        }
+
+        return normalized;
+    }
 }
 
 /// <summary>
@@ -245,6 +308,11 @@ public class StatusReopenPermission
     public DateTime? ConsumedAtUtc { get; set; }
     public long? ConsumedByTelegramUserId { get; set; }
     public long? ConsumedMessageId { get; set; }
+
+    public string? RevokedBy { get; set; }
+    public DateTime? RevokedAtUtc { get; set; }
+    public string? RevocationReason { get; set; }
+
     public ReopenPermissionStatus PermissionStatus { get; set; } = ReopenPermissionStatus.Available;
 
     public byte[] RowVersion { get; set; } = Array.Empty<byte>();
@@ -279,6 +347,82 @@ public class StatusReopenPermission
             EnabledAtUtc = enabledAtUtc,
             PermissionStatus = ReopenPermissionStatus.Available
         };
+    }
+
+    /// <summary>
+    /// Revokes an Available reopening permission before it is consumed.
+    /// Consumed or Expired permissions cannot be revoked, preserving single-use audit integrity.
+    /// </summary>
+    public void Revoke(string revokedBy, string reason, DateTime revokedAtUtc)
+    {
+        if (string.IsNullOrWhiteSpace(revokedBy))
+        {
+            throw new ArgumentException("Administrator identity (revokedBy) is mandatory to revoke a reopening permission.", nameof(revokedBy));
+        }
+
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            throw new ArgumentException("A mandatory reason must be provided to revoke a reopening permission.", nameof(reason));
+        }
+
+        if (PermissionStatus == ReopenPermissionStatus.Consumed)
+        {
+            throw new InvalidOperationException(
+                "Cannot revoke a reopening permission that has already been consumed.");
+        }
+
+        if (PermissionStatus == ReopenPermissionStatus.Revoked)
+        {
+            throw new InvalidOperationException(
+                "Reopening permission has already been revoked.");
+        }
+
+        if (PermissionStatus == ReopenPermissionStatus.Expired)
+        {
+            throw new InvalidOperationException(
+                "Cannot revoke an expired reopening permission.");
+        }
+
+        PermissionStatus = ReopenPermissionStatus.Revoked;
+        RevokedBy = revokedBy.Trim();
+        RevocationReason = reason.Trim();
+        RevokedAtUtc = revokedAtUtc;
+    }
+
+    /// <summary>
+    /// Expires an Available reopening permission if its granted ReportingDate is earlier than currentReportingDate.
+    /// Consumed and Revoked permissions are never modified.
+    /// </summary>
+    public bool TryExpire(DateOnly currentReportingDate)
+    {
+        if (PermissionStatus == ReopenPermissionStatus.Available && currentReportingDate > ReportingDate)
+        {
+            PermissionStatus = ReopenPermissionStatus.Expired;
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Batch helper that expires all Available permissions whose ReportingDate is earlier than currentReportingDate.
+    /// </summary>
+    public static int ExpireStalePermissions(
+        IEnumerable<StatusReopenPermission> permissions,
+        DateOnly currentReportingDate)
+    {
+        ArgumentNullException.ThrowIfNull(permissions);
+
+        int expiredCount = 0;
+        foreach (var permission in permissions)
+        {
+            if (permission.TryExpire(currentReportingDate))
+            {
+                expiredCount++;
+            }
+        }
+
+        return expiredCount;
     }
 
     public bool TryConsume(

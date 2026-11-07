@@ -4,6 +4,8 @@ namespace OpsConnect.Domain.Organisation;
 
 public static class OrganisationCodeNormalizer
 {
+    public const int MaxCodeLength = 50;
+
     public static string NormalizeCode(string? rawCode, string paramName)
     {
         if (string.IsNullOrWhiteSpace(rawCode))
@@ -15,6 +17,39 @@ public static class OrganisationCodeNormalizer
         if (normalized.Any(char.IsWhiteSpace))
         {
             throw new ArgumentException($"{paramName} ('{rawCode}') cannot contain internal whitespace.", paramName);
+        }
+
+        return normalized;
+    }
+
+    public static string NormalizeAndValidateBranchCode(string? rawBranchCode, string paramName = "branchCode")
+    {
+        var normalized = NormalizeCode(rawBranchCode, paramName);
+
+        if (normalized.Length > MaxCodeLength)
+        {
+            throw new ArgumentException(
+                $"{paramName} ('{rawBranchCode}') exceeds the maximum length of {MaxCodeLength} characters.",
+                paramName);
+        }
+
+        if (normalized[0] is ':' or '-' or '_' ||
+            normalized[^1] is ':' or '-' or '_' ||
+            normalized.Contains("::", StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"{paramName} ('{rawBranchCode}') has an invalid branch code format.",
+                paramName);
+        }
+
+        foreach (var ch in normalized)
+        {
+            if (!char.IsAsciiLetterOrDigit(ch) && ch != ':' && ch != '-' && ch != '_')
+            {
+                throw new ArgumentException(
+                    $"{paramName} ('{rawBranchCode}') contains invalid character '{ch}'.",
+                    paramName);
+            }
         }
 
         return normalized;

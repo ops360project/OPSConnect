@@ -159,9 +159,15 @@ public class ActivityReportingConfigurationEntityConfiguration : IEntityTypeConf
         builder.Property(x => x.TimeZoneId).HasMaxLength(100).IsRequired();
         builder.Property(x => x.CreatedBy).HasMaxLength(100);
         builder.Property(x => x.UpdatedBy).HasMaxLength(100);
+        builder.Property(x => x.RowVersion).IsRowVersion();
 
         builder.HasIndex(x => new { x.ActivityId, x.EffectiveFrom, x.EffectiveTo })
             .HasDatabaseName("IX_ActivityReportingConfiguration_Activity_Effective");
+
+        builder.HasIndex(x => x.ActivityId)
+            .IsUnique()
+            .HasFilter("[EffectiveTo] IS NULL")
+            .HasDatabaseName("UX_ActivityReportingConfiguration_ActivePerActivity");
 
         builder.HasOne(x => x.Activity)
             .WithMany()

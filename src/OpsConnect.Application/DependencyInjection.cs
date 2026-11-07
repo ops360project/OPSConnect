@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using OpsConnect.Application.Activities.Common;
 using OpsConnect.Application.Common;
 using OpsConnect.Application.Organisation;
 
@@ -10,6 +11,7 @@ public static class DependencyInjection
     {
         services.AddSingleton<IBusinessClock, SystemBusinessClock>();
         services.AddSingleton<IOrganisationHierarchyImportValidator, OrganisationHierarchyImportValidator>();
+        services.AddSingleton<ITelegramActivityMessageParser, TelegramActivityMessageParser>();
         return services;
     }
 }

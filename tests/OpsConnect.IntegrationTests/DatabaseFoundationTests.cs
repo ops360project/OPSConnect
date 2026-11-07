@@ -65,6 +65,7 @@ public class DatabaseFoundationTests
     [InlineData(typeof(SummaryLog), "UX_SummaryLog_IdempotencyKey")]
     [InlineData(typeof(ReportDeliveryLog), "UX_ReportDeliveryLog_IdempotencyKey")]
     [InlineData(typeof(ReportDeliveryLog), "UX_ReportDeliveryLog_ReportId_DestinationGroupId")]
+    [InlineData(typeof(ActivityReportingConfiguration), "UX_ActivityReportingConfiguration_ActivePerActivity")]
     public void EfModel_ShouldDefineCriticalUniqueConstraints(
         Type entityType,
         string expectedIndexName)
@@ -116,6 +117,7 @@ public class DatabaseFoundationTests
     [InlineData(typeof(ReportingCycle))]
     [InlineData(typeof(ReportingSlot))]
     [InlineData(typeof(ReportDeliveryLog))]
+    [InlineData(typeof(ActivityReportingConfiguration))]
     public void EfModel_ShouldConfigureRowVersionConcurrencyToken(Type entityType)
     {
         using var context = CreateDesignTimeContext();
@@ -128,6 +130,20 @@ public class DatabaseFoundationTests
     }
 
     [Fact]
+    public void EfModel_ActivityReportingConfigurationActiveIndex_ShouldHaveNullEffectiveToFilter()
+    {
+        using var context = CreateDesignTimeContext();
+        var modelEntity = context.Model.FindEntityType(typeof(ActivityReportingConfiguration));
+        Assert.NotNull(modelEntity);
+
+        var filteredIndex = modelEntity.GetIndexes()
+            .Single(i => i.GetDatabaseName() == "UX_ActivityReportingConfiguration_ActivePerActivity");
+
+        Assert.True(filteredIndex.IsUnique);
+        Assert.Equal("[EffectiveTo] IS NULL", filteredIndex.GetFilter());
+    }
+
+    [Fact]
     public void EfMigrations_ShouldContainExpectedMigrations()
     {
         using var context = CreateDesignTimeContext();
@@ -136,6 +152,7 @@ public class DatabaseFoundationTests
         Assert.Contains(migrations, m => m.EndsWith("_InitialFoundation", StringComparison.Ordinal));
         Assert.Contains(migrations, m => m.EndsWith("_HardeningCoreInvariants", StringComparison.Ordinal));
         Assert.Contains(migrations, m => m.EndsWith("_OrganisationMasterInvariants", StringComparison.Ordinal));
+        Assert.Contains(migrations, m => m.EndsWith("_ActivityConfigurationInvariants", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -222,6 +239,37 @@ public class DatabaseFoundationTests
                 DateTime.UtcNow);
             context.OrganisationMappingHistories.Add(duplicateOpenHistory);
 
+            await Assert.ThrowsAsync<DbUpdateException>(() => context.SaveChangesAsync());
+
+            await transaction.RollbackAsync();
+        });
+    }
+
+    [Fact]
+    public async Task LiveDatabase_ShouldEnforceSingleOpenActivityReportingConfigurationPerActivity()
+    {
+        await using var context = CreateDesignTimeContext();
+        if (!await context.Database.CanConnectAsync())
+        {
+            return;
+        }
+
+        var strategy = context.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            await using var transaction = await context.Database.BeginTransactionAsync();
+
+            // ActivityId = 1 (RFFO) already has an open-ended (EffectiveTo = null) seeded configuration.
+            // Attempting to insert a second open-ended configuration for ActivityId = 1 must violate UX_ActivityReportingConfiguration_ActivePerActivity.
+            var duplicateOpenConfig = ActivityReportingConfiguration.Create(
+                activityId: 1,
+                reportingStartTime: new TimeOnly(10, 0),
+                reportingEndTime: new TimeOnly(17, 0),
+                reportingIntervalMinutes: 60,
+                timeZoneId: "Asia/Kolkata",
+                effectiveFrom: new DateOnly(2026, 12, 1));
+
+            context.ActivityReportingConfigurations.Add(duplicateOpenConfig);
             await Assert.ThrowsAsync<DbUpdateException>(() => context.SaveChangesAsync());
 
             await transaction.RollbackAsync();

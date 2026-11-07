@@ -113,6 +113,8 @@ public class StatusReopenPermissionConfiguration : IEntityTypeConfiguration<Stat
         builder.HasKey(x => x.PermissionId);
         builder.Property(x => x.EnabledBy).HasMaxLength(150).IsRequired();
         builder.Property(x => x.Reason).HasMaxLength(500).IsRequired();
+        builder.Property(x => x.RevokedBy).HasMaxLength(150);
+        builder.Property(x => x.RevocationReason).HasMaxLength(500);
         builder.Property(x => x.PermissionStatus).HasConversion<string>().HasMaxLength(30).IsRequired();
         builder.Property(x => x.RowVersion).IsRowVersion();
 

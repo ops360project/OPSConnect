@@ -267,6 +267,17 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
                     b.Property<DateOnly>("ReportingDate")
                         .HasColumnType("date");
 
+                    b.Property<string>("RevocationReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<DateTime?>("RevokedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("RevokedBy")
+                        .HasMaxLength(150)
+                        .HasColumnType("nvarchar(150)");
+
                     b.Property<byte[]>("RowVersion")
                         .IsConcurrencyToken()
                         .IsRequired()
@@ -372,6 +383,12 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
                     b.Property<TimeOnly>("ReportingStartTime")
                         .HasColumnType("time");
 
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
                     b.Property<bool>("StopWhenAllCompleted")
                         .HasColumnType("bit");
 
@@ -388,6 +405,11 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
                         .HasColumnType("nvarchar(100)");
 
                     b.HasKey("ConfigurationId");
+
+                    b.HasIndex("ActivityId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_ActivityReportingConfiguration_ActivePerActivity")
+                        .HasFilter("[EffectiveTo] IS NULL");
 
                     b.HasIndex("ActivityId", "EffectiveFrom", "EffectiveTo")
                         .HasDatabaseName("IX_ActivityReportingConfiguration_Activity_Effective");
@@ -406,6 +428,7 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
                             ReportingEndTime = new TimeOnly(18, 0, 0),
                             ReportingIntervalMinutes = 30,
                             ReportingStartTime = new TimeOnly(9, 0, 0),
+                            RowVersion = new byte[0],
                             StopWhenAllCompleted = true,
                             TimeZoneId = "Asia/Kolkata"
                         });
