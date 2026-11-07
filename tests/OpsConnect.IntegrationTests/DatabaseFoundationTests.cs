@@ -55,6 +55,7 @@ public class DatabaseFoundationTests
 
     [Theory]
     [InlineData(typeof(BranchMaster), "UX_BranchMaster_BranchCode")]
+    [InlineData(typeof(OrganisationMappingHistory), "UX_OrganisationMappingHistory_ActivePerBranch")]
     [InlineData(typeof(ActivityMaster), "UX_ActivityMaster_ActivityCode")]
     [InlineData(typeof(ActivityStatus), "UX_ActivityStatus_Activity_Branch_Date")]
     [InlineData(typeof(StatusReopenPermission), "UX_StatusReopenPermission_ActivePerBranchDate")]
@@ -93,7 +94,23 @@ public class DatabaseFoundationTests
         Assert.Equal("[PermissionStatus] = 'Available'", filteredIndex.GetFilter());
     }
 
+    [Fact]
+    public void EfModel_OrganisationMappingHistoryActiveIndex_ShouldHaveNullEffectiveToDateFilter()
+    {
+        using var context = CreateDesignTimeContext();
+        var modelEntity = context.Model.FindEntityType(typeof(OrganisationMappingHistory));
+        Assert.NotNull(modelEntity);
+
+        var filteredIndex = modelEntity.GetIndexes()
+            .Single(i => i.GetDatabaseName() == "UX_OrganisationMappingHistory_ActivePerBranch");
+
+        Assert.True(filteredIndex.IsUnique);
+        Assert.Equal("[EffectiveToDate] IS NULL", filteredIndex.GetFilter());
+    }
+
     [Theory]
+    [InlineData(typeof(BranchMaster))]
+    [InlineData(typeof(OrganisationMappingHistory))]
     [InlineData(typeof(ActivityStatus))]
     [InlineData(typeof(StatusReopenPermission))]
     [InlineData(typeof(ReportingCycle))]
@@ -111,12 +128,14 @@ public class DatabaseFoundationTests
     }
 
     [Fact]
-    public void EfMigrations_ShouldContainInitialFoundationMigration()
+    public void EfMigrations_ShouldContainExpectedMigrations()
     {
         using var context = CreateDesignTimeContext();
         var migrations = context.Database.GetMigrations().ToList();
 
         Assert.Contains(migrations, m => m.EndsWith("_InitialFoundation", StringComparison.Ordinal));
+        Assert.Contains(migrations, m => m.EndsWith("_HardeningCoreInvariants", StringComparison.Ordinal));
+        Assert.Contains(migrations, m => m.EndsWith("_OrganisationMasterInvariants", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -153,5 +172,59 @@ public class DatabaseFoundationTests
 
         var branchCount = await context.Branches.CountAsync();
         Assert.Equal(0, branchCount);
+    }
+
+    [Fact]
+    public async Task LiveDatabase_ShouldEnforceSingleActiveOrganisationMappingHistoryPerBranch()
+    {
+        await using var context = CreateDesignTimeContext();
+        if (!await context.Database.CanConnectAsync())
+        {
+            return;
+        }
+
+        var strategy = context.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            await using var transaction = await context.Database.BeginTransactionAsync();
+
+            var zone = ZoneMaster.Create("TEST-ZONE", "Test Zone");
+            context.Zones.Add(zone);
+            await context.SaveChangesAsync();
+
+            var state = StateMaster.Create(zone, "TEST-STATE", "Test State");
+            context.States.Add(state);
+            await context.SaveChangesAsync();
+
+            var region = RegionMaster.Create(state, "TEST-REG", "Test Region");
+            context.Regions.Add(region);
+            await context.SaveChangesAsync();
+
+            var branch = BranchMaster.CreateWithInitialHistory(
+                zone,
+                state,
+                region,
+                "99:99",
+                "Test Transactional Branch",
+                new DateOnly(2026, 11, 1));
+            context.Branches.Add(branch);
+            await context.SaveChangesAsync();
+
+            // Attempt to insert a second open-ended (EffectiveToDate = null) history record for the same branch
+            var duplicateOpenHistory = OrganisationMappingHistory.CreateOpenMapping(
+                branch,
+                zone,
+                state,
+                region,
+                new DateOnly(2026, 11, 5),
+                "Duplicate open history test",
+                "test",
+                DateTime.UtcNow);
+            context.OrganisationMappingHistories.Add(duplicateOpenHistory);
+
+            await Assert.ThrowsAsync<DbUpdateException>(() => context.SaveChangesAsync());
+
+            await transaction.RollbackAsync();
+        });
     }
 }

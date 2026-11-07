@@ -86,6 +86,7 @@ public class BranchMasterConfiguration : IEntityTypeConfiguration<BranchMaster>
         builder.Property(x => x.BranchName).HasMaxLength(200).IsRequired();
         builder.Property(x => x.CreatedBy).HasMaxLength(100);
         builder.Property(x => x.UpdatedBy).HasMaxLength(100);
+        builder.Property(x => x.RowVersion).IsRowVersion();
 
         builder.HasIndex(x => x.BranchCode)
             .IsUnique()
@@ -127,9 +128,16 @@ public class OrganisationMappingHistoryConfiguration : IEntityTypeConfiguration<
         builder.Property(x => x.RegionName).HasMaxLength(150).IsRequired();
         builder.Property(x => x.ChangeReason).HasMaxLength(500);
         builder.Property(x => x.RecordedBy).HasMaxLength(100);
+        builder.Property(x => x.RowVersion).IsRowVersion();
 
         builder.HasIndex(x => new { x.BranchId, x.EffectiveFromDate })
             .HasDatabaseName("IX_OrganisationMappingHistory_BranchId_EffectiveFromDate");
+
+        // Filtered unique index ensuring at most one currently active (open-ended) hierarchy mapping per branch
+        builder.HasIndex(x => x.BranchId)
+            .IsUnique()
+            .HasFilter("[EffectiveToDate] IS NULL")
+            .HasDatabaseName("UX_OrganisationMappingHistory_ActivePerBranch");
 
         builder.HasOne(x => x.Branch)
             .WithMany(b => b.MappingHistories)

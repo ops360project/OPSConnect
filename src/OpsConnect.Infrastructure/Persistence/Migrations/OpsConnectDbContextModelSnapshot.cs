@@ -708,6 +708,12 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
                     b.Property<int>("RegionId")
                         .HasColumnType("int");
 
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
                     b.Property<int>("StateId")
                         .HasColumnType("int");
 
@@ -785,6 +791,12 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
                         .HasMaxLength(150)
                         .HasColumnType("nvarchar(150)");
 
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
                     b.Property<string>("StateCode")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -812,6 +824,11 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
                         .HasColumnType("nvarchar(150)");
 
                     b.HasKey("MappingHistoryId");
+
+                    b.HasIndex("BranchId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_OrganisationMappingHistory_ActivePerBranch")
+                        .HasFilter("[EffectiveToDate] IS NULL");
 
                     b.HasIndex("BranchId", "EffectiveFromDate")
                         .HasDatabaseName("IX_OrganisationMappingHistory_BranchId_EffectiveFromDate");
