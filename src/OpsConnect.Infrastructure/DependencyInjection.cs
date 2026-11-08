@@ -1,3 +1,5 @@
+using Hangfire;
+using Hangfire.SqlServer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -8,6 +10,7 @@ using OpsConnect.Application.Organisation;
 using OpsConnect.Application.Reporting;
 using OpsConnect.Application.Telegram;
 using OpsConnect.Infrastructure.Persistence;
+using OpsConnect.Infrastructure.Scheduling;
 using OpsConnect.Infrastructure.Services;
 using OpsConnect.Infrastructure.Telegram;
 
@@ -49,6 +52,8 @@ public static class DependencyInjection
         services.AddScoped<IActivityConfigurationService, ActivityConfigurationService>();
         services.AddScoped<IActivityReportingService, ActivityReportingService>();
         services.AddSingleton<ITelegramReportFormatter, TelegramReportFormatter>();
+        services.AddScoped<IScheduledReportingService, ScheduledReportingService>();
+        services.AddTransient<ScheduledReportingBackgroundJob>();
 
         services.AddOptions<TelegramBotOptions>()
             .Configure(options => BindTelegramBotOptions(configuration, options))
@@ -103,5 +108,30 @@ public static class DependencyInjection
         }
 
         return list;
+    }
+
+    public static IServiceCollection AddHangfireServices(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        var connectionString = configuration.GetConnectionString(ConnectionStringName);
+        if (!string.IsNullOrWhiteSpace(connectionString))
+        {
+            services.AddHangfire(config => config
+                .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
+                .UseSimpleAssemblyNameTypeSerializer()
+                .UseRecommendedSerializerSettings()
+                .UseSqlServerStorage(connectionString, new SqlServerStorageOptions
+                {
+                    CommandBatchMaxTimeout = TimeSpan.FromMinutes(5),
+                    SlidingInvisibilityTimeout = TimeSpan.FromMinutes(5),
+                    QueuePollInterval = TimeSpan.Zero,
+                    UseRecommendedIsolationLevel = true,
+                    DisableGlobalLocks = true,
+                    SchemaName = "admin"
+                }));
+        }
+
+        return services;
     }
 }

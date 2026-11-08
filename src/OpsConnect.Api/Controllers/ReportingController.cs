@@ -14,10 +14,14 @@ namespace OpsConnect.Api.Controllers;
 public class ReportingController : ControllerBase
 {
     private readonly IActivityReportingService _reportingService;
+    private readonly IScheduledReportingService? _scheduledReportingService;
 
-    public ReportingController(IActivityReportingService reportingService)
+    public ReportingController(
+        IActivityReportingService reportingService,
+        IScheduledReportingService? scheduledReportingService = null)
     {
         _reportingService = reportingService;
+        _scheduledReportingService = scheduledReportingService;
     }
 
     /// <summary>
@@ -322,6 +326,168 @@ public class ReportingController : ControllerBase
                 Detail = ex.Message
             });
         }
+    }
+
+    /// <summary>
+    /// Retrieves durable scheduled reporting slots and delivery statuses for the specified activity and reporting date.
+    /// </summary>
+    [HttpGet("{activityCode}/schedule")]
+    [HttpGet("schedule")]
+    [Authorize(Policy = AuthorizationPolicies.ActivityRead)]
+    [ProducesResponseType(typeof(IReadOnlyList<ScheduledSlotStatusDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<ActionResult<IReadOnlyList<ScheduledSlotStatusDto>>> GetSchedule(
+        [FromRoute] string? activityCode = null,
+        [FromQuery] string? queryActivityCode = null,
+        [FromQuery] DateOnly? reportingDate = null,
+        CancellationToken cancellationToken = default)
+    {
+        var authCheck = ValidateAuthorization();
+        if (authCheck is not null)
+        {
+            return authCheck;
+        }
+
+        if (_scheduledReportingService is null)
+        {
+            return Ok(Array.Empty<ScheduledSlotStatusDto>());
+        }
+
+        try
+        {
+            string resolvedCode = ResolveActivityCode(activityCode, queryActivityCode);
+            var slots = await _scheduledReportingService.GetScheduledSlotsAsync(resolvedCode, reportingDate, cancellationToken);
+            return Ok(slots);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new ProblemDetails
+            {
+                Status = StatusCodes.Status404NotFound,
+                Title = "Activity Not Found",
+                Detail = ex.Message
+            });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Status = StatusCodes.Status400BadRequest,
+                Title = "Invalid Reporting Query",
+                Detail = ex.Message
+            });
+        }
+    }
+
+    /// <summary>
+    /// Retrieves durable reporting cycle status for the specified activity and reporting date.
+    /// </summary>
+    [HttpGet("{activityCode}/cycle-status")]
+    [HttpGet("cycle-status")]
+    [Authorize(Policy = AuthorizationPolicies.ActivityRead)]
+    [ProducesResponseType(typeof(ScheduledReportingCycleStatusDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<ActionResult<ScheduledReportingCycleStatusDto>> GetCycleStatus(
+        [FromRoute] string? activityCode = null,
+        [FromQuery] string? queryActivityCode = null,
+        [FromQuery] DateOnly? reportingDate = null,
+        CancellationToken cancellationToken = default)
+    {
+        var authCheck = ValidateAuthorization();
+        if (authCheck is not null)
+        {
+            return authCheck;
+        }
+
+        if (_scheduledReportingService is null)
+        {
+            return NotFound(new ProblemDetails
+            {
+                Status = StatusCodes.Status404NotFound,
+                Title = "Reporting Service Unavailable",
+                Detail = "Scheduled reporting service is not available."
+            });
+        }
+
+        try
+        {
+            string resolvedCode = ResolveActivityCode(activityCode, queryActivityCode);
+            var cycle = await _scheduledReportingService.GetReportingCycleStatusAsync(resolvedCode, reportingDate, cancellationToken);
+            if (cycle is null)
+            {
+                return NotFound(new ProblemDetails
+                {
+                    Status = StatusCodes.Status404NotFound,
+                    Title = "Reporting Cycle Not Found",
+                    Detail = $"No reporting cycle found for activity '{resolvedCode}' on {reportingDate}."
+                });
+            }
+
+            return Ok(cycle);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new ProblemDetails
+            {
+                Status = StatusCodes.Status404NotFound,
+                Title = "Activity Not Found",
+                Detail = ex.Message
+            });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Status = StatusCodes.Status400BadRequest,
+                Title = "Invalid Reporting Query",
+                Detail = ex.Message
+            });
+        }
+    }
+
+    /// <summary>
+    /// Triggers immediate execution of due scheduled reports for all active activities or a specific activity.
+    /// </summary>
+    [HttpPost("{activityCode}/dispatch")]
+    [HttpPost("dispatch")]
+    [Authorize(Policy = AuthorizationPolicies.ActivityManage)]
+    [ProducesResponseType(typeof(ScheduledReportingDispatchResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<ActionResult<ScheduledReportingDispatchResult>> TriggerDispatch(
+        [FromRoute] string? activityCode = null,
+        [FromQuery] string? queryActivityCode = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (User?.Identity?.IsAuthenticated != true)
+        {
+            return Unauthorized();
+        }
+
+        if (!User.IsInRole(SystemRoles.SuperAdmin) && !User.IsInRole(SystemRoles.Admin))
+        {
+            return Forbid();
+        }
+
+        if (_scheduledReportingService is null)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Status = StatusCodes.Status400BadRequest,
+                Title = "Service Unavailable",
+                Detail = "Scheduled reporting service is not configured."
+            });
+        }
+
+        var result = await _scheduledReportingService.DispatchDueReportsAsync(asOfUtc: null, cancellationToken);
+        return Ok(result);
     }
 
     private ActionResult? ValidateAuthorization()
