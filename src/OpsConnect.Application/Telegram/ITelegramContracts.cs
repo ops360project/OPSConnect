@@ -60,6 +60,12 @@ public interface ITelegramMessageIngestionService
         NormalizedTelegramMessageEnvelope envelope,
         TelegramGroupAuthorizationResult groupAuthorization,
         CancellationToken cancellationToken = default);
+
+    Task<TelegramMessageActivityProcessingResult> ProcessIngestedMessageAsync(
+        long telegramMessageLogId,
+        NormalizedTelegramMessageEnvelope envelope,
+        TelegramGroupAuthorizationResult groupAuthorization,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>

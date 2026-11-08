@@ -116,6 +116,7 @@ public class DatabaseFoundationTests
     [InlineData(typeof(OrganisationMappingHistory))]
     [InlineData(typeof(ActivityStatus))]
     [InlineData(typeof(StatusReopenPermission))]
+    [InlineData(typeof(TelegramMessageLog))]
     [InlineData(typeof(ReportingCycle))]
     [InlineData(typeof(ReportingSlot))]
     [InlineData(typeof(ReportDeliveryLog))]
@@ -157,6 +158,7 @@ public class DatabaseFoundationTests
         Assert.Contains(migrations, m => m.EndsWith("_ActivityConfigurationInvariants", StringComparison.Ordinal));
         Assert.Contains(migrations, m => m.EndsWith("_RffoSourceMessageIdempotency", StringComparison.Ordinal));
         Assert.Contains(migrations, m => m.EndsWith("_TelegramMessageIngestionAndIdempotency", StringComparison.Ordinal));
+        Assert.Contains(migrations, m => m.EndsWith("_TelegramMessageProcessingConcurrencyAndState", StringComparison.Ordinal));
     }
 
     [Fact]

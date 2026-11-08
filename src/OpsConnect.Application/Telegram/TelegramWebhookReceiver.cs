@@ -6,7 +6,8 @@ namespace OpsConnect.Application.Telegram;
 
 /// <summary>
 /// Coordinates Telegram webhook security verification, payload size enforcement, JSON deserialization,
-/// update normalisation, Open Group Mode source-group authorisation, and durable message ingestion.
+/// update normalisation, Open Group Mode source-group authorisation, durable message ingestion,
+/// and synchronous activity status processing via ITelegramMessageIngestionService.
 /// </summary>
 public sealed class TelegramWebhookReceiver : ITelegramWebhookReceiver
 {
@@ -234,7 +235,7 @@ public sealed class TelegramWebhookReceiver : ITelegramWebhookReceiver
             groupAuth,
             cancellationToken);
 
-        if (!ingestion.IsPersistedOrDuplicate)
+        if (!ingestion.IsPersistedOrDuplicate || !ingestion.TelegramMessageLogId.HasValue)
         {
             return new TelegramWebhookHandlingResult(
                 IsSuccess: false,
@@ -247,7 +248,7 @@ public sealed class TelegramWebhookReceiver : ITelegramWebhookReceiver
                 Message: ingestion.ErrorMessage ?? "Temporary service error while persisting Telegram update; please retry.");
         }
 
-        if (ingestion.IsDuplicate)
+        if (ingestion.IsDuplicate && !ingestion.RequiresActivityProcessing)
         {
             return new TelegramWebhookHandlingResult(
                 IsSuccess: true,
@@ -265,20 +266,75 @@ public sealed class TelegramWebhookReceiver : ITelegramWebhookReceiver
                 ReceivedAtUtc: ingestion.ReceivedAtUtc);
         }
 
+        // 8. Process the newly ingested (or retry-recoverable) message through IActivityUpdateProcessor
+        var processing = await _messageIngestionService.ProcessIngestedMessageAsync(
+            ingestion.TelegramMessageLogId.Value,
+            envelope,
+            groupAuth,
+            cancellationToken);
+
+        if (!processing.IsCompleted)
+        {
+            return new TelegramWebhookHandlingResult(
+                IsSuccess: false,
+                Outcome: TelegramUpdateHandlingOutcome.ProcessingFailed,
+                RecommendedHttpStatusCode: 503,
+                UpdateId: envelope.UpdateId,
+                TelegramChatId: envelope.TelegramChatId,
+                TelegramMessageId: envelope.TelegramMessageId,
+                ErrorCode: "ActivityProcessingFailed",
+                Message: processing.FailureReason ?? "Temporary service error while processing activity update; please retry.",
+                NormalizedEnvelope: envelope,
+                AuthorizedActivityCodes: groupAuth.AuthorizedActivityCodes,
+                TelegramMessageLogId: ingestion.TelegramMessageLogId,
+                PersistedProcessingStatus: processing.FinalProcessingStatus,
+                ReceivedAtUtc: ingestion.ReceivedAtUtc);
+        }
+
+        if (processing.IsDuplicateOrAlreadyProcessed)
+        {
+            return new TelegramWebhookHandlingResult(
+                IsSuccess: true,
+                Outcome: TelegramUpdateHandlingOutcome.DuplicateIgnored,
+                RecommendedHttpStatusCode: 200,
+                UpdateId: envelope.UpdateId,
+                TelegramChatId: envelope.TelegramChatId,
+                TelegramMessageId: envelope.TelegramMessageId,
+                ErrorCode: null,
+                Message: "Duplicate or concurrently processed Telegram update recognised and safely ignored.",
+                NormalizedEnvelope: envelope,
+                AuthorizedActivityCodes: groupAuth.AuthorizedActivityCodes,
+                TelegramMessageLogId: ingestion.TelegramMessageLogId,
+                PersistedProcessingStatus: processing.FinalProcessingStatus,
+                ReceivedAtUtc: ingestion.ReceivedAtUtc,
+                ActivityProcessingResult: processing.ActivityResult);
+        }
+
+        bool isBusinessAccepted = processing.ActivityResult?.IsAccepted == true;
+        var finalOutcome = isBusinessAccepted
+            ? TelegramUpdateHandlingOutcome.ProcessedSuccessfully
+            : TelegramUpdateHandlingOutcome.RejectedActivitySubmission;
+
+        var finalMessage = processing.ActivityResult?.ReplyMessage
+            ?? (isBusinessAccepted
+                ? "Telegram activity update processed successfully."
+                : "Telegram activity update rejected by business validation.");
+
         return new TelegramWebhookHandlingResult(
             IsSuccess: true,
-            Outcome: TelegramUpdateHandlingOutcome.AcceptedForProcessing,
+            Outcome: finalOutcome,
             RecommendedHttpStatusCode: 200,
             UpdateId: envelope.UpdateId,
             TelegramChatId: envelope.TelegramChatId,
             TelegramMessageId: envelope.TelegramMessageId,
-            ErrorCode: null,
-            Message: "Telegram update durably ingested and ready for activity processing.",
+            ErrorCode: isBusinessAccepted ? null : processing.FinalProcessingStatus.ToString(),
+            Message: finalMessage,
             NormalizedEnvelope: envelope,
             AuthorizedActivityCodes: groupAuth.AuthorizedActivityCodes,
             TelegramMessageLogId: ingestion.TelegramMessageLogId,
-            PersistedProcessingStatus: ingestion.ProcessingStatus,
-            ReceivedAtUtc: ingestion.ReceivedAtUtc);
+            PersistedProcessingStatus: processing.FinalProcessingStatus,
+            ReceivedAtUtc: ingestion.ReceivedAtUtc,
+            ActivityProcessingResult: processing.ActivityResult);
     }
 
     public TelegramBotMaskedDiagnosticsDto GetMaskedConfigurationDiagnostics()

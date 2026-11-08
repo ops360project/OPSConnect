@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using OpsConnect.Application.Activities.Common;
 using OpsConnect.Domain.Telegram;
 
 namespace OpsConnect.Application.Telegram;
@@ -231,7 +232,10 @@ public enum TelegramUpdateHandlingOutcome
     RejectedMalformedPayload = 6,
     RejectedUnauthorizedSourceGroup = 7,
     DuplicateIgnored = 8,
-    FailedPersistence = 9
+    FailedPersistence = 9,
+    ProcessedSuccessfully = 10,
+    RejectedActivitySubmission = 11,
+    ProcessingFailed = 12
 }
 
 public sealed record TelegramUpdateNormalizationResult(
@@ -284,7 +288,17 @@ public sealed record TelegramMessageIngestionResult(
     MessageProcessingStatus? ProcessingStatus,
     DateTime? ReceivedAtUtc,
     string? ErrorCode,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    bool RequiresActivityProcessing = false);
+
+public sealed record TelegramMessageActivityProcessingResult(
+    bool IsCompleted,
+    bool IsDuplicateOrAlreadyProcessed,
+    long TelegramMessageLogId,
+    MessageProcessingStatus FinalProcessingStatus,
+    DateTime? ProcessedAtUtc,
+    ActivityUpdateProcessingResult? ActivityResult,
+    string? FailureReason);
 
 public sealed record TelegramWebhookHandlingResult(
     bool IsSuccess,
@@ -299,7 +313,8 @@ public sealed record TelegramWebhookHandlingResult(
     IReadOnlyList<string>? AuthorizedActivityCodes = null,
     long? TelegramMessageLogId = null,
     MessageProcessingStatus? PersistedProcessingStatus = null,
-    DateTime? ReceivedAtUtc = null);
+    DateTime? ReceivedAtUtc = null,
+    ActivityUpdateProcessingResult? ActivityProcessingResult = null);
 
 public sealed record TelegramBotSendResult(
     bool IsSuccess,

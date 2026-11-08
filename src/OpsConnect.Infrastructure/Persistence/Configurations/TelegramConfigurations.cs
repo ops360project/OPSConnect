@@ -44,6 +44,7 @@ public class TelegramMessageLogConfiguration : IEntityTypeConfiguration<Telegram
         builder.Property(x => x.ParsedStatusText).HasMaxLength(50);
         builder.Property(x => x.ProcessingStatus).HasConversion<string>().HasMaxLength(50).IsRequired();
         builder.Property(x => x.RejectionReason).HasMaxLength(1000);
+        builder.Property(x => x.RowVersion).IsRowVersion().IsConcurrencyToken();
 
         // Unique duplicate-detection key 1: Telegram Update ID (when present)
         builder.HasIndex(x => x.TelegramUpdateId)

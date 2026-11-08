@@ -1397,6 +1397,9 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
                     b.Property<DateTime?>("ProcessedAtUtc")
                         .HasColumnType("datetime2");
 
+                    b.Property<DateTime?>("ProcessingStartedAtUtc")
+                        .HasColumnType("datetime2");
+
                     b.Property<string>("ProcessingStatus")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -1419,6 +1422,12 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
 
                     b.Property<DateOnly?>("ReportingDate")
                         .HasColumnType("date");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
 
                     b.Property<string>("SenderDisplayName")
                         .HasMaxLength(200)

@@ -21,7 +21,8 @@ public enum MessageProcessingStatus
     RejectedInactiveBranch = 8,
     RejectedInvalidTransition = 9,
     DuplicateIgnored = 10,
-    FailedError = 11
+    FailedError = 11,
+    Processing = 12
 }
 
 /// <summary>
@@ -59,6 +60,7 @@ public class TelegramMessageLog
 
     public DateTime MessageTimestampUtc { get; set; }
     public DateTime ReceivedAtUtc { get; set; } = DateTime.UtcNow;
+    public DateTime? ProcessingStartedAtUtc { get; set; }
     public DateTime? ProcessedAtUtc { get; set; }
 
     public string RawMessageText { get; set; } = string.Empty;
@@ -73,4 +75,66 @@ public class TelegramMessageLog
     public MessageProcessingStatus ProcessingStatus { get; set; } = MessageProcessingStatus.Received;
     public string? RejectionReason { get; set; }
     public long? ReplyTelegramMessageId { get; set; }
+    public byte[] RowVersion { get; set; } = Array.Empty<byte>();
+
+    public bool IsTerminallyProcessed =>
+        ProcessingStatus is
+            MessageProcessingStatus.Accepted or
+            MessageProcessingStatus.AcceptedUnchanged or
+            MessageProcessingStatus.RejectedInvalidFormat or
+            MessageProcessingStatus.RejectedUnauthorisedGroup or
+            MessageProcessingStatus.RejectedUnknownActivity or
+            MessageProcessingStatus.RejectedUnknownBranch or
+            MessageProcessingStatus.RejectedInactiveBranch or
+            MessageProcessingStatus.RejectedInvalidTransition;
+
+    public bool IsActivelyProcessing(DateTime utcNow, TimeSpan staleProcessingTimeout) =>
+        ProcessingStatus == MessageProcessingStatus.Processing &&
+        ProcessingStartedAtUtc.HasValue &&
+        utcNow - ProcessingStartedAtUtc.Value < staleProcessingTimeout;
+
+    public bool CanStartOrRecoverProcessing(DateTime utcNow, TimeSpan staleProcessingTimeout) =>
+        ProcessingStatus is MessageProcessingStatus.Received or MessageProcessingStatus.FailedError ||
+        (ProcessingStatus == MessageProcessingStatus.Processing &&
+         (!ProcessingStartedAtUtc.HasValue || utcNow - ProcessingStartedAtUtc.Value >= staleProcessingTimeout));
+
+    public void MarkProcessing(DateTime startedAtUtc)
+    {
+        ProcessingStatus = MessageProcessingStatus.Processing;
+        ProcessingStartedAtUtc = startedAtUtc;
+        RejectionReason = null;
+    }
+
+    public void MarkCompleted(
+        MessageProcessingStatus finalStatus,
+        DateTime processedAtUtc,
+        int? activityId,
+        int? branchId,
+        DateOnly? reportingDate,
+        string? parsedActivityCode,
+        string? parsedBranchCode,
+        string? parsedStatusText,
+        string? rejectionReason)
+    {
+        ProcessingStatus = finalStatus;
+        ProcessingStartedAtUtc = null;
+        ProcessedAtUtc = processedAtUtc;
+        ActivityId = activityId ?? ActivityId;
+        BranchId = branchId ?? BranchId;
+        ReportingDate = reportingDate ?? ReportingDate;
+        ParsedActivityCode = parsedActivityCode ?? ParsedActivityCode;
+        ParsedBranchCode = parsedBranchCode ?? ParsedBranchCode;
+        ParsedStatusText = parsedStatusText ?? ParsedStatusText;
+        RejectionReason = string.IsNullOrWhiteSpace(rejectionReason) ? null : rejectionReason.Trim();
+    }
+
+    public void MarkProcessingFailed(string sanitizedFailureReason)
+    {
+        ProcessingStatus = MessageProcessingStatus.FailedError;
+        ProcessingStartedAtUtc = null;
+        ProcessedAtUtc = null;
+        RejectionReason = string.IsNullOrWhiteSpace(sanitizedFailureReason)
+            ? "Temporary processing error; eligible for retry recovery."
+            : sanitizedFailureReason.Trim();
+    }
 }

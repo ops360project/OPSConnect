@@ -1,4 +1,5 @@
 using OpsConnect.Application.Telegram;
+using OpsConnect.Domain.Telegram;
 
 namespace OpsConnect.UnitTests;
 
@@ -255,5 +256,67 @@ public class TelegramWebhookFoundationTests
             }
         };
         Assert.False(normalizer.Normalize(missingChatId).IsValid);
+    }
+
+    [Fact]
+    public void TelegramMessageLog_LifecycleStateTransitions_ShouldDistinguishTerminalRecoverableAndStaleProcessing()
+    {
+        var t0 = new DateTime(2026, 11, 8, 8, 0, 0, DateTimeKind.Utc);
+        var timeout = TimeSpan.FromSeconds(60);
+
+        var log = new TelegramMessageLog
+        {
+            TelegramUpdateId = 50001,
+            TelegramChatId = -100123456,
+            TelegramMessageId = 10,
+            MessageTimestampUtc = t0,
+            ReceivedAtUtc = t0,
+            RawMessageText = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+            ProcessingStatus = MessageProcessingStatus.Received
+        };
+
+        // 1. Received is not terminal and can start processing
+        Assert.False(log.IsTerminallyProcessed);
+        Assert.False(log.IsActivelyProcessing(t0, timeout));
+        Assert.True(log.CanStartOrRecoverProcessing(t0, timeout));
+
+        // 2. MarkProcessing transitions to Processing and records ProcessingStartedAtUtc
+        log.MarkProcessing(t0);
+        Assert.Equal(MessageProcessingStatus.Processing, log.ProcessingStatus);
+        Assert.Equal(t0, log.ProcessingStartedAtUtc);
+        Assert.False(log.IsTerminallyProcessed);
+        Assert.True(log.IsActivelyProcessing(t0.AddSeconds(30), timeout));
+        Assert.False(log.CanStartOrRecoverProcessing(t0.AddSeconds(30), timeout));
+
+        // 3. Stale Processing (after timeout) becomes recoverable
+        Assert.False(log.IsActivelyProcessing(t0.AddSeconds(61), timeout));
+        Assert.True(log.CanStartOrRecoverProcessing(t0.AddSeconds(61), timeout));
+
+        // 4. FailedError is recoverable
+        log.MarkProcessingFailed("Transient failure during processing.");
+        Assert.Equal(MessageProcessingStatus.FailedError, log.ProcessingStatus);
+        Assert.Null(log.ProcessingStartedAtUtc);
+        Assert.Null(log.ProcessedAtUtc);
+        Assert.False(log.IsTerminallyProcessed);
+        Assert.True(log.CanStartOrRecoverProcessing(t0.AddSeconds(63), timeout));
+
+        // 5. MarkCompleted with Accepted or Rejected* is terminal and never recoverable
+        log.MarkProcessing(t0.AddSeconds(65));
+        log.MarkCompleted(
+            finalStatus: MessageProcessingStatus.Accepted,
+            processedAtUtc: t0.AddSeconds(66),
+            activityId: 1,
+            branchId: 10,
+            reportingDate: new DateOnly(2026, 11, 8),
+            parsedActivityCode: "RFFO",
+            parsedBranchCode: "36:01",
+            parsedStatusText: "Pending",
+            rejectionReason: null);
+
+        Assert.Equal(MessageProcessingStatus.Accepted, log.ProcessingStatus);
+        Assert.Null(log.ProcessingStartedAtUtc);
+        Assert.Equal(t0.AddSeconds(66), log.ProcessedAtUtc);
+        Assert.True(log.IsTerminallyProcessed);
+        Assert.False(log.CanStartOrRecoverProcessing(t0.AddMinutes(10), timeout));
     }
 }
