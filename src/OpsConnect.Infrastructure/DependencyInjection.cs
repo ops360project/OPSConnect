@@ -5,6 +5,7 @@ using OpsConnect.Application.Activities.Common;
 using OpsConnect.Application.Activities.RFFO;
 using OpsConnect.Application.Administration;
 using OpsConnect.Application.Organisation;
+using OpsConnect.Application.Reporting;
 using OpsConnect.Application.Telegram;
 using OpsConnect.Infrastructure.Persistence;
 using OpsConnect.Infrastructure.Services;
@@ -46,6 +47,7 @@ public static class DependencyInjection
         services.AddScoped<IActivityStatusQueryService, ActivityStatusQueryService>();
         services.AddScoped<IStatusReopenPermissionService, StatusReopenPermissionService>();
         services.AddScoped<IActivityConfigurationService, ActivityConfigurationService>();
+        services.AddScoped<IActivityReportingService, ActivityReportingService>();
 
         services.AddOptions<TelegramBotOptions>()
             .Configure(options => BindTelegramBotOptions(configuration, options))
