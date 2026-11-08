@@ -53,6 +53,14 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
                         .HasMaxLength(30)
                         .HasColumnType("nvarchar(30)");
 
+                    b.Property<string>("PendingReason")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<string>("PendingReasonDescription")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
                     b.Property<string>("PreviousStatus")
                         .IsRequired()
                         .HasMaxLength(30)
@@ -180,6 +188,14 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
 
+                    b.Property<string>("CurrentPendingReason")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<string>("CurrentPendingReasonDescription")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
                     b.Property<string>("CurrentStatus")
                         .IsRequired()
                         .HasMaxLength(30)
@@ -221,6 +237,9 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
                     b.HasIndex("ActivityId", "BranchId", "ReportingDate")
                         .IsUnique()
                         .HasDatabaseName("UX_ActivityStatus_Activity_Branch_Date");
+
+                    b.HasIndex("ActivityId", "ReportingDate", "CurrentPendingReason")
+                        .HasDatabaseName("IX_ActivityStatus_Activity_Date_PendingReason");
 
                     b.HasIndex("ActivityId", "ReportingDate", "CurrentStatus")
                         .HasDatabaseName("IX_ActivityStatus_Activity_Date_Status");

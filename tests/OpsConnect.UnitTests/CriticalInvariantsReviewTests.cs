@@ -29,7 +29,8 @@ public class CriticalInvariantsReviewTests
             telegramUserId: 90001,
             senderDisplayName: "Branch User",
             occurredAtUtc: new DateTime(2026, 11, 7, 6, 0, 0, DateTimeKind.Utc),
-            reopenPermission: null);
+            reopenPermission: null,
+            pendingReason: PendingReasonCode.CashShortage);
 
         Assert.False(result.IsAccepted);
         Assert.Equal(TransitionOutcome.Rejected, result.Outcome);
@@ -82,7 +83,8 @@ public class CriticalInvariantsReviewTests
             telegramUserId: 90002,
             senderDisplayName: "Branch Operator",
             occurredAtUtc: consumedAtUtc,
-            reopenPermission: permission);
+            reopenPermission: permission,
+            pendingReason: PendingReasonCode.CashShortage);
 
         Assert.True(firstAttempt.IsAccepted);
         Assert.Equal(TransitionOutcome.AcceptedViaReopen, firstAttempt.Outcome);
@@ -111,7 +113,8 @@ public class CriticalInvariantsReviewTests
             telegramUserId: 90002,
             senderDisplayName: "Branch Operator",
             occurredAtUtc: consumedAtUtc.AddMinutes(15),
-            reopenPermission: permission);
+            reopenPermission: permission,
+            pendingReason: PendingReasonCode.CashShortage);
 
         Assert.False(secondReopenAttempt.IsAccepted);
         Assert.Equal(TransitionOutcome.Rejected, secondReopenAttempt.Outcome);
@@ -145,7 +148,8 @@ public class CriticalInvariantsReviewTests
             telegramUserId: 90005,
             senderDisplayName: "Operator",
             occurredAtUtc: new DateTime(2026, 11, 7, 5, 0, 0, DateTimeKind.Utc),
-            reopenPermission: permission);
+            reopenPermission: permission,
+            pendingReason: PendingReasonCode.CashShortage);
 
         Assert.False(result.IsAccepted);
         Assert.Equal(ReopenPermissionStatus.Expired, permission.PermissionStatus);

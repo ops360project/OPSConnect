@@ -11,7 +11,11 @@ public enum TelegramMessageParseErrorCode
     MissingRequiredField = 5,
     InvalidActivityCode = 6,
     InvalidBranchCode = 7,
-    UnsupportedStatus = 8
+    UnsupportedStatus = 8,
+    InvalidPendingReason = 9,
+    MissingPendingReason = 10,
+    MissingPendingReasonDescription = 11,
+    PendingReasonDescriptionTooLong = 12
 }
 
 public sealed record TelegramMessageParseError(
@@ -27,7 +31,11 @@ public sealed record ParsedTelegramActivityMessage(
     BranchActivityStatus Status,
     string RawActivityValue,
     string RawBranchValue,
-    string RawStatusValue);
+    string RawStatusValue,
+    PendingReasonCode? PendingReason = null,
+    string? PendingReasonDescription = null,
+    string? RawReasonValue = null,
+    string? RawDescriptionValue = null);
 
 public sealed record TelegramMessageParseResult(
     bool IsSuccess,

@@ -10,6 +10,53 @@ public enum BranchActivityStatus
     Completed = 2
 }
 
+public enum PendingReasonCode
+{
+    None = 0,
+    CashShortage = 1,
+    SystemOutage = 2,
+    CustomerDelay = 3,
+    FieldExecutiveOnLeave = 4,
+    OperationalIssue = 5,
+    Other = 6
+}
+
+public static class PendingReasonHelper
+{
+    public const int MaxDescriptionLength = 500;
+
+    public static string ToDisplayName(this PendingReasonCode reasonCode) => reasonCode switch
+    {
+        PendingReasonCode.CashShortage => "Cash Shortage",
+        PendingReasonCode.SystemOutage => "System Outage",
+        PendingReasonCode.CustomerDelay => "Customer Delay",
+        PendingReasonCode.FieldExecutiveOnLeave => "Field Executive On Leave",
+        PendingReasonCode.OperationalIssue => "Operational Issue",
+        PendingReasonCode.Other => "Other",
+        _ => reasonCode.ToString()
+    };
+
+    public static bool TryParse(string? rawValue, out PendingReasonCode reasonCode)
+    {
+        reasonCode = PendingReasonCode.None;
+        if (string.IsNullOrWhiteSpace(rawValue))
+        {
+            return false;
+        }
+
+        var normalized = rawValue.Trim().Replace(" ", string.Empty).Replace("_", string.Empty);
+        if (Enum.TryParse<PendingReasonCode>(normalized, ignoreCase: true, out var parsed) &&
+            parsed != PendingReasonCode.None &&
+            Enum.IsDefined(parsed))
+        {
+            reasonCode = parsed;
+            return true;
+        }
+
+        return false;
+    }
+}
+
 public enum ReopenPermissionStatus
 {
     Available = 1,
@@ -123,6 +170,8 @@ public class ActivityStatus : AuditableEntity
     public int BranchId { get; set; }
     public DateOnly ReportingDate { get; set; }
     public BranchActivityStatus CurrentStatus { get; set; } = BranchActivityStatus.NotReported;
+    public PendingReasonCode? CurrentPendingReason { get; set; }
+    public string? CurrentPendingReasonDescription { get; set; }
 
     public long? LastTelegramMessageLogId { get; set; }
     public long? LastUpdatedByTelegramUserId { get; set; }
@@ -145,7 +194,9 @@ public class ActivityStatus : AuditableEntity
         long? telegramUserId,
         string? senderDisplayName,
         DateTime occurredAtUtc,
-        StatusReopenPermission? reopenPermission = null)
+        StatusReopenPermission? reopenPermission = null,
+        PendingReasonCode? pendingReason = null,
+        string? pendingReasonDescription = null)
     {
         if (incomingStatus == BranchActivityStatus.NotReported)
         {
@@ -160,11 +211,64 @@ public class ActivityStatus : AuditableEntity
                 RejectionReason: "Branches cannot submit NotReported as an incoming status.");
         }
 
+        // Validate Pending submissions require a valid pending reason code, and Other requires mandatory description
+        if (incomingStatus == BranchActivityStatus.Pending)
+        {
+            if (!pendingReason.HasValue || pendingReason.Value == PendingReasonCode.None || !Enum.IsDefined(pendingReason.Value))
+            {
+                return new StatusTransitionResult(
+                    IsAccepted: false,
+                    Outcome: TransitionOutcome.Rejected,
+                    PreviousStatus: CurrentStatus,
+                    NewStatus: CurrentStatus,
+                    DidStatusChange: false,
+                    DidConsumeReopenPermission: false,
+                    ConsumedPermissionId: null,
+                    RejectionReason: "A valid pending reason is required when submitting Pending status. Valid reason codes are: CashShortage, SystemOutage, CustomerDelay, FieldExecutiveOnLeave, OperationalIssue, Other.");
+            }
+
+            if (pendingReason.Value == PendingReasonCode.Other && string.IsNullOrWhiteSpace(pendingReasonDescription))
+            {
+                return new StatusTransitionResult(
+                    IsAccepted: false,
+                    Outcome: TransitionOutcome.Rejected,
+                    PreviousStatus: CurrentStatus,
+                    NewStatus: CurrentStatus,
+                    DidStatusChange: false,
+                    DidConsumeReopenPermission: false,
+                    ConsumedPermissionId: null,
+                    RejectionReason: "Description is mandatory when reason code is Other.");
+            }
+
+            if (pendingReasonDescription is not null && pendingReasonDescription.Length > PendingReasonHelper.MaxDescriptionLength)
+            {
+                return new StatusTransitionResult(
+                    IsAccepted: false,
+                    Outcome: TransitionOutcome.Rejected,
+                    PreviousStatus: CurrentStatus,
+                    NewStatus: CurrentStatus,
+                    DidStatusChange: false,
+                    DidConsumeReopenPermission: false,
+                    ConsumedPermissionId: null,
+                    RejectionReason: $"Pending reason description cannot exceed {PendingReasonHelper.MaxDescriptionLength} characters.");
+            }
+        }
+
         var previousStatus = CurrentStatus;
 
         // Unchanged status submissions (Pending -> Pending or Completed -> Completed)
         if (previousStatus == incomingStatus)
         {
+            if (incomingStatus == BranchActivityStatus.Pending)
+            {
+                CurrentPendingReason = pendingReason;
+                CurrentPendingReasonDescription = string.IsNullOrWhiteSpace(pendingReasonDescription) ? null : pendingReasonDescription.Trim();
+                LastTelegramMessageLogId = telegramMessageLogId;
+                LastUpdatedByTelegramUserId = telegramUserId;
+                LastUpdatedByDisplayName = senderDisplayName;
+                UpdatedAtUtc = occurredAtUtc;
+            }
+
             return new StatusTransitionResult(
                 IsAccepted: true,
                 Outcome: TransitionOutcome.AcceptedUnchanged,
@@ -181,6 +285,17 @@ public class ActivityStatus : AuditableEntity
             (previousStatus == BranchActivityStatus.Pending && incomingStatus == BranchActivityStatus.Completed))
         {
             CurrentStatus = incomingStatus;
+            if (incomingStatus == BranchActivityStatus.Pending)
+            {
+                CurrentPendingReason = pendingReason;
+                CurrentPendingReasonDescription = string.IsNullOrWhiteSpace(pendingReasonDescription) ? null : pendingReasonDescription.Trim();
+            }
+            else
+            {
+                CurrentPendingReason = null;
+                CurrentPendingReasonDescription = null;
+            }
+
             LastTelegramMessageLogId = telegramMessageLogId;
             LastUpdatedByTelegramUserId = telegramUserId;
             LastUpdatedByDisplayName = senderDisplayName;
@@ -234,6 +349,8 @@ public class ActivityStatus : AuditableEntity
             }
 
             CurrentStatus = BranchActivityStatus.Pending;
+            CurrentPendingReason = pendingReason;
+            CurrentPendingReasonDescription = string.IsNullOrWhiteSpace(pendingReasonDescription) ? null : pendingReasonDescription.Trim();
             ReopenedCount++;
             LastTelegramMessageLogId = telegramMessageLogId;
             LastUpdatedByTelegramUserId = telegramUserId;
@@ -282,6 +399,8 @@ public class ActivityHistory
     public long? TelegramUserId { get; set; }
     public string? TelegramUsername { get; set; }
     public string? TelegramDisplayName { get; set; }
+    public PendingReasonCode? PendingReason { get; set; }
+    public string? PendingReasonDescription { get; set; }
     public string? Notes { get; set; }
     public DateTime RecordedAtUtc { get; set; } = DateTime.UtcNow;
 

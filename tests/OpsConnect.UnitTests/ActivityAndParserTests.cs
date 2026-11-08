@@ -13,12 +13,14 @@ public class ActivityAndParserTests
     // =========================================================================
 
     [Fact]
-    public void Parse_WithCanonicalPendingMessage_ShouldReturnSuccessAndNormalizedFields()
+    public void Parse_WithCanonicalPendingMessage_WithValidReason_ShouldReturnSuccessAndNormalizedFields()
     {
         const string message = """
             Activity- RFFO
             BranchID- 36:01
             Status- Pending
+            Reason- CashShortage
+            Description- Cash collection delayed from hub
             """;
 
         var result = _parser.Parse(message);
@@ -30,6 +32,124 @@ public class ActivityAndParserTests
         Assert.Equal("RFFO", result.ParsedMessage!.ActivityCode);
         Assert.Equal("36:01", result.ParsedMessage.BranchCode);
         Assert.Equal(BranchActivityStatus.Pending, result.ParsedMessage.Status);
+        Assert.Equal(PendingReasonCode.CashShortage, result.ParsedMessage.PendingReason);
+        Assert.Equal("Cash collection delayed from hub", result.ParsedMessage.PendingReasonDescription);
+    }
+
+    [Fact]
+    public void Parse_WithPendingMessage_WithoutReason_ShouldReturnMissingPendingReasonError()
+    {
+        const string message = """
+            Activity- RFFO
+            BranchID- 36:01
+            Status- Pending
+            """;
+
+        var result = _parser.Parse(message);
+
+        Assert.False(result.IsSuccess);
+        Assert.Null(result.ParsedMessage);
+        var error = Assert.Single(result.Errors);
+        Assert.Equal(TelegramActivityMessageParser.ReasonFieldName, error.FieldName);
+        Assert.Equal(TelegramMessageParseErrorCode.MissingPendingReason, error.ErrorCode);
+    }
+
+    [Fact]
+    public void Parse_WithPendingMessage_WithInvalidReasonCode_ShouldReturnInvalidPendingReasonError()
+    {
+        const string message = """
+            Activity- RFFO
+            BranchID- 36:01
+            Status- Pending
+            Reason- InvalidReasonXYZ
+            """;
+
+        var result = _parser.Parse(message);
+
+        Assert.False(result.IsSuccess);
+        var error = Assert.Single(result.Errors);
+        Assert.Equal(TelegramActivityMessageParser.ReasonFieldName, error.FieldName);
+        Assert.Equal(TelegramMessageParseErrorCode.InvalidPendingReason, error.ErrorCode);
+    }
+
+    [Fact]
+    public void Parse_WithPendingMessage_WithReasonOther_WithoutDescription_ShouldReturnMissingDescriptionError()
+    {
+        const string message = """
+            Activity- RFFO
+            BranchID- 36:01
+            Status- Pending
+            Reason- Other
+            """;
+
+        var result = _parser.Parse(message);
+
+        Assert.False(result.IsSuccess);
+        var error = Assert.Single(result.Errors);
+        Assert.Equal(TelegramActivityMessageParser.DescriptionFieldName, error.FieldName);
+        Assert.Equal(TelegramMessageParseErrorCode.MissingPendingReasonDescription, error.ErrorCode);
+    }
+
+    [Fact]
+    public void Parse_WithPendingMessage_WithReasonOther_WithValidDescription_ShouldSucceed()
+    {
+        const string message = """
+            Activity- RFFO
+            BranchID- 36:01
+            Status- Pending
+            Reason- Other
+            Description- Local power outage affecting network switch
+            """;
+
+        var result = _parser.Parse(message);
+
+        Assert.True(result.IsSuccess);
+        Assert.NotNull(result.ParsedMessage);
+        Assert.Equal(PendingReasonCode.Other, result.ParsedMessage!.PendingReason);
+        Assert.Equal("Local power outage affecting network switch", result.ParsedMessage.PendingReasonDescription);
+    }
+
+    [Fact]
+    public void Parse_WithPendingMessage_WithDescriptionExceeding500Chars_ShouldReturnTooLongError()
+    {
+        string longDesc = new string('A', 501);
+        string message = $"""
+            Activity- RFFO
+            BranchID- 36:01
+            Status- Pending
+            Reason- OperationalIssue
+            Description- {longDesc}
+            """;
+
+        var result = _parser.Parse(message);
+
+        Assert.False(result.IsSuccess);
+        var error = Assert.Single(result.Errors);
+        Assert.Equal(TelegramActivityMessageParser.DescriptionFieldName, error.FieldName);
+        Assert.Equal(TelegramMessageParseErrorCode.PendingReasonDescriptionTooLong, error.ErrorCode);
+    }
+
+    [Theory]
+    [InlineData("CashShortage", PendingReasonCode.CashShortage)]
+    [InlineData("Cash Shortage", PendingReasonCode.CashShortage)]
+    [InlineData("SystemOutage", PendingReasonCode.SystemOutage)]
+    [InlineData("CustomerDelay", PendingReasonCode.CustomerDelay)]
+    [InlineData("FieldExecutiveOnLeave", PendingReasonCode.FieldExecutiveOnLeave)]
+    [InlineData("OperationalIssue", PendingReasonCode.OperationalIssue)]
+    public void Parse_AllStandardPendingReasons_ShouldParseCorrectly(string rawReason, PendingReasonCode expected)
+    {
+        string message = $"""
+            Activity- RFFO
+            BranchID- 36:01
+            Status- Pending
+            Reason- {rawReason}
+            """;
+
+        var result = _parser.Parse(message);
+
+        Assert.True(result.IsSuccess);
+        Assert.NotNull(result.ParsedMessage);
+        Assert.Equal(expected, result.ParsedMessage!.PendingReason);
     }
 
     [Fact]
@@ -109,7 +229,7 @@ public class ActivityAndParserTests
             Activity- RFFO
             BranchID- 36:01
             Branch code: 36:01
-            Status- Pending
+            Status- Completed
             """;
 
         var result = _parser.Parse(message);
@@ -127,8 +247,8 @@ public class ActivityAndParserTests
         const string message = """
             Activity- RFFO
             BranchID- 36:01
-            Status- Pending
             Status- Completed
+            Status- Pending
             """;
 
         var result = _parser.Parse(message);
@@ -141,8 +261,8 @@ public class ActivityAndParserTests
     }
 
     [Theory]
-    [InlineData("Activity- RFFO\nBranchID- 36:01\nStatus- Pending\nPlease update urgently")]
-    [InlineData("Activity- RFFO\nBranchID- 36:01\nStatus- Pending\nRemarks- Done")]
+    [InlineData("Activity- RFFO\nBranchID- 36:01\nStatus- Completed\nPlease update urgently")]
+    [InlineData("Activity- RFFO\nBranchID- 36:01\nStatus- Completed\nNote- Done")]
     public void Parse_WithAmbiguousOrUnrecognisedLine_ShouldReturnUnrecognisedLineError(string message)
     {
         var result = _parser.Parse(message);
@@ -163,7 +283,7 @@ public class ActivityAndParserTests
         var message = $"""
             Activity- RFFO
             BranchID- {invalidBranchCode}
-            Status- Pending
+            Status- Completed
             """;
 
         var result = _parser.Parse(message);
@@ -206,7 +326,7 @@ public class ActivityAndParserTests
         var message = $"""
             Activity- {invalidActivity}
             BranchID- 36:01
-            Status- Pending
+            Status- Completed
             """;
 
         var result = _parser.Parse(message);

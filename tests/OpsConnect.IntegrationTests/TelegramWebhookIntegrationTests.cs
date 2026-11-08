@@ -240,7 +240,7 @@ public class TelegramWebhookIntegrationTests
                 {
                     message_id = 501,
                     date = 1762580000,
-                    text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                    text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage",
                     chat = new
                     {
                         id = DbSourceChatId,
@@ -331,7 +331,7 @@ public class TelegramWebhookIntegrationTests
                 {
                     message_id = 503,
                     date = 1762580000,
-                    text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                    text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage",
                     chat = new { id = UnauthorizedChatId, type = "supergroup", title = "Random Unauthorised Group" },
                     from = new { id = 900123, is_bot = false, first_name = "Suresh" }
                 }
@@ -364,7 +364,7 @@ public class TelegramWebhookIntegrationTests
                 {
                     message_id = 504,
                     date = 1762580000,
-                    text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                    text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage",
                     chat = new { id = InactiveDbGroupChatId, type = "supergroup", title = "Deactivated Legacy Source Group" },
                     from = new { id = 900123, is_bot = false, first_name = "Suresh" }
                 }
@@ -413,7 +413,7 @@ public class TelegramWebhookIntegrationTests
             Assert.Equal("Suresh Nayak", persistedAuthorizedLog.SenderDisplayName);
             Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1762580000).UtcDateTime, persistedAuthorizedLog.MessageTimestampUtc);
             Assert.Equal(fixedReceivedUtc, persistedAuthorizedLog.ReceivedAtUtc);
-            Assert.Equal("Activity : RFFO\nBranch Code : 36:01\nStatus : Pending", persistedAuthorizedLog.RawMessageText);
+            Assert.Equal("Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage", persistedAuthorizedLog.RawMessageText);
             Assert.Equal("RFFO", persistedAuthorizedLog.ParsedActivityCode);
             Assert.Equal("36:01", persistedAuthorizedLog.ParsedBranchCode);
             Assert.Equal("Pending", persistedAuthorizedLog.ParsedStatusText);
@@ -568,7 +568,7 @@ public class TelegramWebhookIntegrationTests
             var pendingRes = await SendAuthorizedWebhookAsync(
                 300001,
                 801,
-                "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending");
+                "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage");
             Assert.True(pendingRes.IsSuccess);
             Assert.Equal(TelegramUpdateHandlingOutcome.ProcessedSuccessfully, pendingRes.Outcome);
             Assert.Equal(MessageProcessingStatus.Accepted, pendingRes.PersistedProcessingStatus);
@@ -617,7 +617,7 @@ public class TelegramWebhookIntegrationTests
             var unknownBranchRes = await SendAuthorizedWebhookAsync(
                 300005,
                 805,
-                "Activity : RFFO\nBranch Code : 99:99\nStatus : Pending");
+                "Activity : RFFO\nBranch Code : 99:99\nStatus : Pending\nReason : CashShortage");
             Assert.Equal(TelegramUpdateHandlingOutcome.RejectedActivitySubmission, unknownBranchRes.Outcome);
             Assert.Equal(MessageProcessingStatus.RejectedUnknownBranch, unknownBranchRes.PersistedProcessingStatus);
 
@@ -625,7 +625,7 @@ public class TelegramWebhookIntegrationTests
             var inactiveBranchRes = await SendAuthorizedWebhookAsync(
                 300006,
                 806,
-                "Activity : RFFO\nBranch Code : 36:03\nStatus : Pending");
+                "Activity : RFFO\nBranch Code : 36:03\nStatus : Pending\nReason : CashShortage");
             Assert.Equal(TelegramUpdateHandlingOutcome.RejectedActivitySubmission, inactiveBranchRes.Outcome);
             Assert.Equal(MessageProcessingStatus.RejectedInactiveBranch, inactiveBranchRes.PersistedProcessingStatus);
 
@@ -650,7 +650,7 @@ public class TelegramWebhookIntegrationTests
             var inactiveActivityRes = await SendAuthorizedWebhookAsync(
                 300007,
                 807,
-                "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending",
+                "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending\nReason : CashShortage",
                 new FixedTestClock(baseUtc.AddMinutes(16), businessDate));
             Assert.Equal(TelegramUpdateHandlingOutcome.RejectedActivitySubmission, inactiveActivityRes.Outcome);
             Assert.Equal(MessageProcessingStatus.RejectedUnknownActivity, inactiveActivityRes.PersistedProcessingStatus);
@@ -665,7 +665,7 @@ public class TelegramWebhookIntegrationTests
             var reopenWithoutPermRes = await SendAuthorizedWebhookAsync(
                 300008,
                 808,
-                "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage",
                 new FixedTestClock(baseUtc.AddMinutes(20), businessDate));
             Assert.Equal(TelegramUpdateHandlingOutcome.RejectedActivitySubmission, reopenWithoutPermRes.Outcome);
             Assert.Equal(MessageProcessingStatus.RejectedInvalidTransition, reopenWithoutPermRes.PersistedProcessingStatus);
@@ -695,7 +695,7 @@ public class TelegramWebhookIntegrationTests
             var reopenWithPermRes = await SendAuthorizedWebhookAsync(
                 300009,
                 809,
-                "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage",
                 new FixedTestClock(baseUtc.AddMinutes(30), businessDate));
             Assert.Equal(TelegramUpdateHandlingOutcome.ProcessedSuccessfully, reopenWithPermRes.Outcome);
             Assert.Equal(MessageProcessingStatus.Accepted, reopenWithPermRes.PersistedProcessingStatus);
@@ -729,7 +729,7 @@ public class TelegramWebhookIntegrationTests
                 SenderDisplayName = "Bikash",
                 MessageTimestampUtc = baseUtc.AddMinutes(35),
                 ReceivedAtUtc = baseUtc.AddMinutes(35),
-                RawMessageText = "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending",
+                RawMessageText = "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending\nReason : CashShortage",
                 ParsedActivityCode = "RFFO",
                 ParsedBranchCode = "36:02",
                 ParsedStatusText = "Pending",
@@ -744,7 +744,7 @@ public class TelegramWebhookIntegrationTests
             var recoveredFromFailedRes = await SendAuthorizedWebhookAsync(
                 300010,
                 810,
-                "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending",
+                "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending\nReason : CashShortage",
                 new FixedTestClock(baseUtc.AddMinutes(36), businessDate));
             Assert.Equal(TelegramUpdateHandlingOutcome.ProcessedSuccessfully, recoveredFromFailedRes.Outcome);
             Assert.Equal(failedErrorLog.TelegramMessageLogId, recoveredFromFailedRes.TelegramMessageLogId);
@@ -827,7 +827,7 @@ public class TelegramWebhookIntegrationTests
                 {
                     message_id = 701,
                     date = 1762580000,
-                    text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                    text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage",
                     chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Configured Group" },
                     from = new { id = 8001, is_bot = false, first_name = "Anita", username = "anita_3601" }
                 }
@@ -1091,7 +1091,7 @@ public class TelegramWebhookIntegrationTests
             {
                 message_id = 801,
                 date = 1762580000,
-                text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage",
                 chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
                 from = new { id = 7001, is_bot = false, first_name = "Rajesh", username = "rajesh_ops" }
             }
@@ -1232,7 +1232,7 @@ public class TelegramWebhookIntegrationTests
             {
                 message_id = 805,
                 date = 1762580400,
-                text = "Activity : UNKNOWN_ACT\nBranch Code : 36:01\nStatus : Pending",
+                text = "Activity : UNKNOWN_ACT\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage",
                 chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
                 from = new { id = 7002, is_bot = false, first_name = "User2" }
             }
@@ -1262,7 +1262,7 @@ public class TelegramWebhookIntegrationTests
             {
                 message_id = 806,
                 date = 1762580500,
-                text = "Activity : RFFO\nBranch Code : 99:99\nStatus : Pending",
+                text = "Activity : RFFO\nBranch Code : 99:99\nStatus : Pending\nReason : CashShortage",
                 chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
                 from = new { id = 7002, is_bot = false, first_name = "User2" }
             }
@@ -1292,7 +1292,7 @@ public class TelegramWebhookIntegrationTests
             {
                 message_id = 807,
                 date = 1762580600,
-                text = "Activity : RFFO\nBranch Code : 36:03\nStatus : Pending",
+                text = "Activity : RFFO\nBranch Code : 36:03\nStatus : Pending\nReason : CashShortage",
                 chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
                 from = new { id = 7002, is_bot = false, first_name = "User2" }
             }
@@ -1322,7 +1322,7 @@ public class TelegramWebhookIntegrationTests
             {
                 message_id = 808,
                 date = 1762580700,
-                text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage",
                 chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
                 from = new { id = 7002, is_bot = false, first_name = "User2" }
             }
@@ -1353,7 +1353,7 @@ public class TelegramWebhookIntegrationTests
             {
                 message_id = 810,
                 date = 1762580800,
-                text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage",
                 chat = new { id = UnauthorizedChatId, type = "supergroup", title = "Rogue Group" },
                 from = new { id = 9999, is_bot = false, first_name = "Attacker" }
             }
@@ -1407,7 +1407,7 @@ public class TelegramWebhookIntegrationTests
             {
                 message_id = 811,
                 date = 1762580900,
-                text = "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending",
+                text = "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending\nReason : CashShortage",
                 chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
                 from = new { id = 7001, is_bot = false, first_name = "Rajesh", username = "rajesh_ops" }
             }

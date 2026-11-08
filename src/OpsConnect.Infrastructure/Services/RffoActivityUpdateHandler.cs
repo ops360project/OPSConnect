@@ -290,9 +290,11 @@ public sealed class RffoActivityUpdateHandler : ActivityUpdateHandlerBase, IRffo
             telegramUserId: command.TelegramUserId,
             senderDisplayName: command.SenderDisplayName ?? command.SenderUsername,
             occurredAtUtc: occurredAtUtc,
-            reopenPermission: reopenPermission);
+            reopenPermission: reopenPermission,
+            pendingReason: command.PendingReason,
+            pendingReasonDescription: command.PendingReasonDescription);
 
-        if (transition.IsAccepted && transition.DidStatusChange)
+        if (transition.IsAccepted)
         {
             statusEntity.UpdatedBy = actorName;
             if (isNewStatusRow)
@@ -332,6 +334,8 @@ public sealed class RffoActivityUpdateHandler : ActivityUpdateHandlerBase, IRffo
             TelegramUserId = command.TelegramUserId,
             TelegramUsername = command.SenderUsername,
             TelegramDisplayName = command.SenderDisplayName,
+            PendingReason = transition.IsAccepted && transition.NewStatus == BranchActivityStatus.Pending ? command.PendingReason : null,
+            PendingReasonDescription = transition.IsAccepted && transition.NewStatus == BranchActivityStatus.Pending ? command.PendingReasonDescription : null,
             Notes = BuildHistoryNotes(command, transition),
             RecordedAtUtc = occurredAtUtc
         };
@@ -381,7 +385,7 @@ public sealed class RffoActivityUpdateHandler : ActivityUpdateHandlerBase, IRffo
             _ => MessageProcessingStatus.RejectedInvalidTransition
         };
 
-        var replyMessage = BuildReplyMessage(activity.ActivityCode, branch.BranchCode, reportingDate, transition);
+        var replyMessage = BuildReplyMessage(activity.ActivityCode, branch.BranchCode, reportingDate, transition, command.PendingReason);
 
         return new ActivityUpdateProcessingResult(
             IsAccepted: transition.IsAccepted,
@@ -441,14 +445,18 @@ public sealed class RffoActivityUpdateHandler : ActivityUpdateHandlerBase, IRffo
             return transition.RejectionReason ?? $"Rejected transition from {transition.PreviousStatus} to {command.IncomingStatus}.";
         }
 
+        var reasonSuffix = transition.NewStatus == BranchActivityStatus.Pending && command.PendingReason.HasValue
+            ? $" (Reason: {command.PendingReason.Value.ToDisplayName()}{(!string.IsNullOrWhiteSpace(command.PendingReasonDescription) ? $" - {command.PendingReasonDescription}" : "")})"
+            : string.Empty;
+
         return transition.Outcome switch
         {
             TransitionOutcome.AcceptedUnchanged =>
-                $"Unchanged status submission ({transition.CurrentStatusForNotes()}); current status retained.",
+                $"Unchanged status submission ({transition.CurrentStatusForNotes()}); current status retained{reasonSuffix}.",
             TransitionOutcome.AcceptedViaReopen =>
-                $"Status reopened from {transition.PreviousStatus} to {transition.NewStatus} using permission ID {transition.ConsumedPermissionId}.",
+                $"Status reopened from {transition.PreviousStatus} to {transition.NewStatus} using permission ID {transition.ConsumedPermissionId}{reasonSuffix}.",
             _ =>
-                $"Status transitioned from {transition.PreviousStatus} to {transition.NewStatus}."
+                $"Status transitioned from {transition.PreviousStatus} to {transition.NewStatus}{reasonSuffix}."
         };
     }
 
@@ -456,21 +464,26 @@ public sealed class RffoActivityUpdateHandler : ActivityUpdateHandlerBase, IRffo
         string activityCode,
         string branchCode,
         DateOnly reportingDate,
-        StatusTransitionResult transition)
+        StatusTransitionResult transition,
+        PendingReasonCode? pendingReason = null)
     {
         if (!transition.IsAccepted)
         {
             return $"[{activityCode}] Branch {branchCode} ({reportingDate:dd-MMM-yyyy}): Update rejected. {transition.RejectionReason}";
         }
 
+        var reasonSuffix = transition.NewStatus == BranchActivityStatus.Pending && pendingReason.HasValue
+            ? $" (Reason: {pendingReason.Value})"
+            : string.Empty;
+
         return transition.Outcome switch
         {
             TransitionOutcome.AcceptedUnchanged =>
-                $"[{activityCode}] Branch {branchCode} ({reportingDate:dd-MMM-yyyy}): Status is already {transition.NewStatus} (no change).",
+                $"[{activityCode}] Branch {branchCode} ({reportingDate:dd-MMM-yyyy}): Status is already {transition.NewStatus} (no change){reasonSuffix}.",
             TransitionOutcome.AcceptedViaReopen =>
-                $"[{activityCode}] Branch {branchCode} ({reportingDate:dd-MMM-yyyy}): Status reopened from {transition.PreviousStatus} to {transition.NewStatus}.",
+                $"[{activityCode}] Branch {branchCode} ({reportingDate:dd-MMM-yyyy}): Status reopened from {transition.PreviousStatus} to {transition.NewStatus}{reasonSuffix}.",
             _ =>
-                $"[{activityCode}] Branch {branchCode} ({reportingDate:dd-MMM-yyyy}): Status updated from {transition.PreviousStatus} to {transition.NewStatus}."
+                $"[{activityCode}] Branch {branchCode} ({reportingDate:dd-MMM-yyyy}): Status updated from {transition.PreviousStatus} to {transition.NewStatus}{reasonSuffix}."
         };
     }
 }

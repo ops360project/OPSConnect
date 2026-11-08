@@ -92,7 +92,9 @@ public sealed class ActivityStatusQueryService : IActivityStatusQueryService
                 LastTelegramMessageLogId: statusRow?.LastTelegramMessageLogId,
                 LastUpdatedByTelegramUserId: statusRow?.LastUpdatedByTelegramUserId,
                 LastUpdatedByDisplayName: statusRow?.LastUpdatedByDisplayName,
-                LastUpdatedAtUtc: statusRow?.UpdatedAtUtc ?? statusRow?.CreatedAtUtc));
+                LastUpdatedAtUtc: statusRow?.UpdatedAtUtc ?? statusRow?.CreatedAtUtc,
+                CurrentPendingReason: currentStatus == BranchActivityStatus.Pending ? statusRow?.CurrentPendingReason : null,
+                CurrentPendingReasonDescription: currentStatus == BranchActivityStatus.Pending ? statusRow?.CurrentPendingReasonDescription : null));
         }
 
         // Summary counts always represent the full active mapped branch population on the reporting date
@@ -255,7 +257,9 @@ public sealed class ActivityStatusQueryService : IActivityStatusQueryService
             LastTelegramMessageLogId: statusRow?.LastTelegramMessageLogId,
             LastUpdatedByTelegramUserId: statusRow?.LastUpdatedByTelegramUserId,
             LastUpdatedByDisplayName: statusRow?.LastUpdatedByDisplayName,
-            LastUpdatedAtUtc: statusRow?.UpdatedAtUtc ?? statusRow?.CreatedAtUtc);
+            LastUpdatedAtUtc: statusRow?.UpdatedAtUtc ?? statusRow?.CreatedAtUtc,
+            CurrentPendingReason: (hasRow && statusRow!.CurrentStatus == BranchActivityStatus.Pending) ? statusRow.CurrentPendingReason : null,
+            CurrentPendingReasonDescription: (hasRow && statusRow!.CurrentStatus == BranchActivityStatus.Pending) ? statusRow.CurrentPendingReasonDescription : null);
     }
 
     public async Task<BranchActivityHistoryResultDto?> GetBranchActivityHistoryAsync(
@@ -347,7 +351,9 @@ public sealed class ActivityStatusQueryService : IActivityStatusQueryService
                 h.TelegramUsername,
                 h.TelegramDisplayName,
                 h.Notes,
-                h.RecordedAtUtc))
+                h.RecordedAtUtc,
+                h.PendingReason,
+                h.PendingReasonDescription))
             .ToListAsync(cancellationToken);
 
         return new BranchActivityHistoryResultDto(

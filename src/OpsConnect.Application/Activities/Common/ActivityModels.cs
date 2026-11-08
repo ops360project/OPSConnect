@@ -33,7 +33,9 @@ public sealed record ActivityUpdateSubmissionCommand(
     string? SenderUsername = null,
     string? SenderDisplayName = null,
     DateTime? OccurredAtUtc = null,
-    DateOnly? ExplicitReportingDate = null)
+    DateOnly? ExplicitReportingDate = null,
+    PendingReasonCode? PendingReason = null,
+    string? PendingReasonDescription = null)
 {
     public ActivityUpdateSubmissionCommand ValidateAndNormalize()
     {
@@ -47,12 +49,37 @@ public sealed record ActivityUpdateSubmissionCommand(
                 nameof(IncomingStatus));
         }
 
+        if (IncomingStatus == BranchActivityStatus.Pending)
+        {
+            if (!PendingReason.HasValue || PendingReason.Value == PendingReasonCode.None || !Enum.IsDefined(PendingReason.Value))
+            {
+                throw new ArgumentException(
+                    "A valid PendingReason is required when IncomingStatus is Pending.",
+                    nameof(PendingReason));
+            }
+
+            if (PendingReason.Value == PendingReasonCode.Other && string.IsNullOrWhiteSpace(PendingReasonDescription))
+            {
+                throw new ArgumentException(
+                    "PendingReasonDescription is mandatory when PendingReason is Other.",
+                    nameof(PendingReasonDescription));
+            }
+
+            if (PendingReasonDescription is not null && PendingReasonDescription.Length > PendingReasonHelper.MaxDescriptionLength)
+            {
+                throw new ArgumentException(
+                    $"PendingReasonDescription cannot exceed {PendingReasonHelper.MaxDescriptionLength} characters.",
+                    nameof(PendingReasonDescription));
+            }
+        }
+
         return this with
         {
             ActivityCode = normalizedActivityCode,
             BranchCode = normalizedBranchCode,
             SenderUsername = string.IsNullOrWhiteSpace(SenderUsername) ? null : SenderUsername.Trim(),
-            SenderDisplayName = string.IsNullOrWhiteSpace(SenderDisplayName) ? null : SenderDisplayName.Trim()
+            SenderDisplayName = string.IsNullOrWhiteSpace(SenderDisplayName) ? null : SenderDisplayName.Trim(),
+            PendingReasonDescription = string.IsNullOrWhiteSpace(PendingReasonDescription) ? null : PendingReasonDescription.Trim()
         };
     }
 }
@@ -144,7 +171,9 @@ public sealed record BranchActivityStatusItemDto(
     long? LastTelegramMessageLogId,
     long? LastUpdatedByTelegramUserId,
     string? LastUpdatedByDisplayName,
-    DateTime? LastUpdatedAtUtc);
+    DateTime? LastUpdatedAtUtc,
+    PendingReasonCode? CurrentPendingReason = null,
+    string? CurrentPendingReasonDescription = null);
 
 /// <summary>
 /// Snapshot of branch-wise statuses and reconciled summary counts for an activity on a reporting date.
@@ -182,7 +211,9 @@ public sealed record ActivityHistoryEntryDto(
     string? TelegramUsername,
     string? TelegramDisplayName,
     string? Notes,
-    DateTime RecordedAtUtc);
+    DateTime RecordedAtUtc,
+    PendingReasonCode? PendingReason = null,
+    string? PendingReasonDescription = null);
 
 /// <summary>
 /// Branch status and chronological audit history for a specific activity and reporting date (or across dates).

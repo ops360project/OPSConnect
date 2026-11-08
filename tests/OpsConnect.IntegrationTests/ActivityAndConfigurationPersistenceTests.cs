@@ -139,7 +139,8 @@ public class ActivityAndConfigurationPersistenceTests
                 TelegramUserId: 7001,
                 SenderUsername: "op_3601",
                 SenderDisplayName: "Operator 36:01",
-                ExplicitReportingDate: Day1));
+                ExplicitReportingDate: Day1,
+                PendingReason: PendingReasonCode.CashShortage));
 
             Assert.True(pending3601.IsAccepted);
             Assert.Equal(MessageProcessingStatus.Accepted, pending3601.ProcessingStatus);
@@ -157,7 +158,8 @@ public class ActivityAndConfigurationPersistenceTests
                 TelegramMessageLogId: 1002,
                 TelegramUserId: 7001,
                 SenderDisplayName: "Operator 36:01",
-                ExplicitReportingDate: Day1));
+                ExplicitReportingDate: Day1,
+                PendingReason: PendingReasonCode.CashShortage));
 
             Assert.True(duplicatePending3601.IsAccepted);
             Assert.Equal(MessageProcessingStatus.AcceptedUnchanged, duplicatePending3601.ProcessingStatus);
@@ -173,7 +175,8 @@ public class ActivityAndConfigurationPersistenceTests
                 TelegramMessageLogId: 1003,
                 TelegramUserId: 7001,
                 SenderDisplayName: "Operator 36:01",
-                ExplicitReportingDate: Day1));
+                ExplicitReportingDate: Day1,
+                PendingReason: PendingReasonCode.CashShortage));
 
             Assert.True(completed3601.IsAccepted);
             Assert.Equal(TransitionOutcome.Accepted, completed3601.Outcome);
@@ -189,7 +192,8 @@ public class ActivityAndConfigurationPersistenceTests
                 TelegramMessageLogId: 1004,
                 TelegramUserId: 7001,
                 SenderDisplayName: "Operator 36:01",
-                ExplicitReportingDate: Day1));
+                ExplicitReportingDate: Day1,
+                PendingReason: PendingReasonCode.CashShortage));
 
             Assert.True(duplicateCompleted3601.IsAccepted);
             Assert.Equal(TransitionOutcome.AcceptedUnchanged, duplicateCompleted3601.Outcome);
@@ -203,7 +207,8 @@ public class ActivityAndConfigurationPersistenceTests
                 TelegramMessageLogId: 1005,
                 TelegramUserId: 7001,
                 SenderDisplayName: "Operator 36:01",
-                ExplicitReportingDate: Day1));
+                ExplicitReportingDate: Day1,
+                PendingReason: PendingReasonCode.CashShortage));
 
             Assert.False(rejectedRevert3601.IsAccepted);
             Assert.Equal(MessageProcessingStatus.RejectedInvalidTransition, rejectedRevert3601.ProcessingStatus);
@@ -218,7 +223,8 @@ public class ActivityAndConfigurationPersistenceTests
                 TelegramMessageLogId: 1006,
                 TelegramUserId: 7002,
                 SenderDisplayName: "Operator 36:02",
-                ExplicitReportingDate: Day1));
+                ExplicitReportingDate: Day1,
+                PendingReason: PendingReasonCode.CashShortage));
 
             Assert.True(completed3602.IsAccepted);
             Assert.Equal(BranchActivityStatus.NotReported, completed3602.PreviousStatus);
@@ -271,7 +277,8 @@ public class ActivityAndConfigurationPersistenceTests
                 BranchCode: "99:99",
                 IncomingStatus: BranchActivityStatus.Pending,
                 TelegramMessageLogId: 2001,
-                ExplicitReportingDate: Day1));
+                ExplicitReportingDate: Day1,
+                PendingReason: PendingReasonCode.CashShortage));
 
             Assert.False(unknownBranch.IsAccepted);
             Assert.Equal(MessageProcessingStatus.RejectedUnknownBranch, unknownBranch.ProcessingStatus);
@@ -282,7 +289,8 @@ public class ActivityAndConfigurationPersistenceTests
                 BranchCode: "36:03",
                 IncomingStatus: BranchActivityStatus.Pending,
                 TelegramMessageLogId: 2002,
-                ExplicitReportingDate: Day1));
+                ExplicitReportingDate: Day1,
+                PendingReason: PendingReasonCode.CashShortage));
 
             Assert.False(inactiveBranch.IsAccepted);
             Assert.Equal(MessageProcessingStatus.RejectedInactiveBranch, inactiveBranch.ProcessingStatus);
@@ -293,7 +301,8 @@ public class ActivityAndConfigurationPersistenceTests
                 BranchCode: "36:01",
                 IncomingStatus: BranchActivityStatus.Pending,
                 TelegramMessageLogId: 2003,
-                ExplicitReportingDate: Day1));
+                ExplicitReportingDate: Day1,
+                PendingReason: PendingReasonCode.CashShortage));
             Assert.True(firstSubmission.IsAccepted);
 
             var duplicateSourceSubmission = await processor.ProcessParsedUpdateAsync(new ActivityUpdateSubmissionCommand(
@@ -301,7 +310,8 @@ public class ActivityAndConfigurationPersistenceTests
                 BranchCode: "36:01",
                 IncomingStatus: BranchActivityStatus.Completed,
                 TelegramMessageLogId: 2003,
-                ExplicitReportingDate: Day1));
+                ExplicitReportingDate: Day1,
+                PendingReason: PendingReasonCode.CashShortage));
 
             Assert.False(duplicateSourceSubmission.IsAccepted);
             Assert.Equal(MessageProcessingStatus.DuplicateIgnored, duplicateSourceSubmission.ProcessingStatus);
@@ -325,7 +335,8 @@ public class ActivityAndConfigurationPersistenceTests
                 BranchCode: "36:01",
                 IncomingStatus: BranchActivityStatus.Completed,
                 TelegramMessageLogId: 2004,
-                ExplicitReportingDate: Day1));
+                ExplicitReportingDate: Day1,
+                PendingReason: PendingReasonCode.CashShortage));
 
             Assert.False(disabledActivityResult.IsAccepted);
             Assert.Equal(MessageProcessingStatus.RejectedUnknownActivity, disabledActivityResult.ProcessingStatus);
@@ -390,7 +401,7 @@ public class ActivityAndConfigurationPersistenceTests
 
             // Attempt Completed -> Pending on Day 2 with only Day 1 permission present -> rejected & Day 1 permission expired!
             var attemptWithOnlyStalePermission = await processor.ProcessParsedUpdateAsync(new ActivityUpdateSubmissionCommand(
-                "RFFO", "36:01", BranchActivityStatus.Pending, TelegramMessageLogId: 3003, ExplicitReportingDate: Day2));
+                "RFFO", "36:01", BranchActivityStatus.Pending, TelegramMessageLogId: 3003, ExplicitReportingDate: Day2, PendingReason: PendingReasonCode.CashShortage));
             Assert.False(attemptWithOnlyStalePermission.IsAccepted);
 
             var expiredReloaded = await context.StatusReopenPermissions
@@ -408,7 +419,7 @@ public class ActivityAndConfigurationPersistenceTests
             Assert.True(grantFor3602.IsSuccess);
 
             var wrongBranchAttempt = await processor.ProcessParsedUpdateAsync(new ActivityUpdateSubmissionCommand(
-                "RFFO", "36:01", BranchActivityStatus.Pending, TelegramMessageLogId: 3004, ExplicitReportingDate: Day2));
+                "RFFO", "36:01", BranchActivityStatus.Pending, TelegramMessageLogId: 3004, ExplicitReportingDate: Day2, PendingReason: PendingReasonCode.CashShortage));
             Assert.False(wrongBranchAttempt.IsAccepted);
 
             // 3. Grant a permission on Day 2 for 36:01, then revoke it -> must NOT allow 36:01 to reopen
@@ -438,7 +449,7 @@ public class ActivityAndConfigurationPersistenceTests
             Assert.Equal(ReopenPermissionStatus.Revoked, revokeResult.Permission!.PermissionStatus);
 
             var attemptAfterRevoke = await processor.ProcessParsedUpdateAsync(new ActivityUpdateSubmissionCommand(
-                "RFFO", "36:01", BranchActivityStatus.Pending, TelegramMessageLogId: 3005, ExplicitReportingDate: Day2));
+                "RFFO", "36:01", BranchActivityStatus.Pending, TelegramMessageLogId: 3005, ExplicitReportingDate: Day2, PendingReason: PendingReasonCode.CashShortage));
             Assert.False(attemptAfterRevoke.IsAccepted);
 
             // 4. Grant a fresh permission on Day 2 for 36:01 and consume it via Pending update
@@ -458,7 +469,8 @@ public class ActivityAndConfigurationPersistenceTests
                 TelegramUserId: 88001,
                 SenderDisplayName: "Branch 36:01 User",
                 OccurredAtUtc: new DateTime(2026, 11, 8, 7, 0, 0, DateTimeKind.Utc),
-                ExplicitReportingDate: Day2));
+                ExplicitReportingDate: Day2,
+                PendingReason: PendingReasonCode.CashShortage));
 
             Assert.True(reopenSuccess.IsAccepted);
             Assert.Equal(TransitionOutcome.AcceptedViaReopen, reopenSuccess.Outcome);
@@ -487,7 +499,7 @@ public class ActivityAndConfigurationPersistenceTests
                 "RFFO", "36:01", BranchActivityStatus.Completed, TelegramMessageLogId: 3007, ExplicitReportingDate: Day2));
 
             var secondReopenWithoutNewGrant = await processor.ProcessParsedUpdateAsync(new ActivityUpdateSubmissionCommand(
-                "RFFO", "36:01", BranchActivityStatus.Pending, TelegramMessageLogId: 3008, ExplicitReportingDate: Day2));
+                "RFFO", "36:01", BranchActivityStatus.Pending, TelegramMessageLogId: 3008, ExplicitReportingDate: Day2, PendingReason: PendingReasonCode.CashShortage));
             Assert.False(secondReopenWithoutNewGrant.IsAccepted);
 
             // Reopening history must preserve all 4 permissions (Expired, Available on 36:02, Revoked, Consumed)
@@ -522,7 +534,7 @@ public class ActivityAndConfigurationPersistenceTests
 
             // First valid submission sets 36:01 to Pending with TelegramMessageLogId = 4001
             var first = await processor.ProcessParsedUpdateAsync(new ActivityUpdateSubmissionCommand(
-                "RFFO", "36:01", BranchActivityStatus.Pending, TelegramMessageLogId: 4001, ExplicitReportingDate: Day1));
+                "RFFO", "36:01", BranchActivityStatus.Pending, TelegramMessageLogId: 4001, ExplicitReportingDate: Day1, PendingReason: PendingReasonCode.CashShortage));
             Assert.True(first.IsAccepted);
 
             // Force a database failure during the ActivityHistory INSERT of the next transition by passing a

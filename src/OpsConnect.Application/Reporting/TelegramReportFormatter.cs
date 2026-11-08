@@ -142,6 +142,18 @@ public sealed class TelegramReportFormatter : ITelegramReportFormatter
 
         string statusDisplay = opt.UseHtmlMarkup ? $"<b>{EscapeHtml(statusText)}</b>" : statusText;
         sb.AppendLine($"Status: {statusDisplay}");
+
+        if (summary.SubmittedPendingBranches > 0 && summary.PendingReasons != null && summary.PendingReasons.Count > 0)
+        {
+            sb.AppendLine();
+            string reasonsTitle = opt.UseHtmlMarkup ? "<b>Pending Reasons:</b>" : "Pending Reasons:";
+            sb.AppendLine(reasonsTitle);
+            foreach (var reason in summary.PendingReasons)
+            {
+                string rName = opt.UseHtmlMarkup ? EscapeHtml(reason.ReasonName) : reason.ReasonName;
+                sb.AppendLine($"• {rName}: {reason.BranchCount} ({reason.PercentageOfPending:0.00}%)");
+            }
+        }
     }
 
     private static List<string> BuildZoneBlock(
@@ -240,6 +252,8 @@ public sealed class TelegramReportFormatter : ITelegramReportFormatter
             string statusLabel = b.CurrentStatus switch
             {
                 BranchActivityStatus.Completed => "Completed",
+                BranchActivityStatus.Pending when b.PendingReason.HasValue =>
+                    $"Pending ({b.PendingReason.Value.ToDisplayName()})",
                 BranchActivityStatus.Pending => "Pending",
                 _ => "Not Reported"
             };

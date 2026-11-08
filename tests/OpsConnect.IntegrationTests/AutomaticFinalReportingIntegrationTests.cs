@@ -29,8 +29,10 @@ public class AutomaticFinalReportingIntegrationTests
     private static readonly DateTime TestUtcNow = new(2026, 11, 10, 3, 30, 0, DateTimeKind.Utc); // 09:00 IST
     private static readonly DateOnly TestDate = new(2026, 11, 10);
 
-    private static string Msg(string branch, string status) =>
-        $"Activity : RFFO\nBranch Code : {branch}\nStatus : {status}";
+    private static string Msg(string branch, string status, string? reason = null) =>
+        string.Equals(status, "Pending", StringComparison.OrdinalIgnoreCase)
+            ? $"Activity : RFFO\nBranch Code : {branch}\nStatus : {status}\nReason : {reason ?? "CashShortage"}"
+            : $"Activity : RFFO\nBranch Code : {branch}\nStatus : {status}";
 
     private static OpsConnectDbContext CreateContext()
     {

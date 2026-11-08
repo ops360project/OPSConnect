@@ -54,7 +54,8 @@ public sealed class ActivityReportingService : IActivityReportingService
             TotalZones: zoneSummaries.Count,
             TotalStates: zoneSummaries.Sum(z => z.States?.Count ?? 0),
             TotalRegions: zoneSummaries.Sum(z => z.States?.Sum(s => s.Regions?.Count ?? 0) ?? 0),
-            Zones: zoneSummaries);
+            Zones: zoneSummaries,
+            PendingReasons: CalculatePendingReasons(snapshot.EvaluatedBranches));
     }
 
     public async Task<IReadOnlyList<ZoneReportSummaryDto>> GetZoneSummariesAsync(
@@ -241,7 +242,9 @@ public sealed class ActivityReportingService : IActivityReportingService
                 LastTelegramMessageLogId: statusRow?.LastTelegramMessageLogId,
                 LastUpdatedByTelegramUserId: statusRow?.LastUpdatedByTelegramUserId,
                 LastUpdatedByDisplayName: statusRow?.LastUpdatedByDisplayName,
-                LastUpdatedAtUtc: statusRow?.UpdatedAtUtc ?? statusRow?.CreatedAtUtc));
+                LastUpdatedAtUtc: statusRow?.UpdatedAtUtc ?? statusRow?.CreatedAtUtc,
+                PendingReason: currentStatus == BranchActivityStatus.Pending ? statusRow?.CurrentPendingReason : null,
+                PendingReasonDescription: currentStatus == BranchActivityStatus.Pending ? statusRow?.CurrentPendingReasonDescription : null));
         }
 
         return new ReportingDataSnapshot(activity, reportingDate, timeZoneId, evaluatedBranches);
@@ -277,7 +280,8 @@ public sealed class ActivityReportingService : IActivityReportingService
                 CompletionPercentage: zoneMetrics.CompletionPercentage,
                 IsEmptyPopulation: zoneMetrics.IsEmpty,
                 IsFullyCompleted: zoneMetrics.IsFullyCompleted,
-                States: states));
+                States: states,
+                PendingReasons: CalculatePendingReasons(zoneGroup.ToList())));
         }
 
         return result;
@@ -317,7 +321,8 @@ public sealed class ActivityReportingService : IActivityReportingService
                 CompletionPercentage: stateMetrics.CompletionPercentage,
                 IsEmptyPopulation: stateMetrics.IsEmpty,
                 IsFullyCompleted: stateMetrics.IsFullyCompleted,
-                Regions: regions));
+                Regions: regions,
+                PendingReasons: CalculatePendingReasons(stateGroup.ToList())));
         }
 
         return result;
@@ -355,10 +360,40 @@ public sealed class ActivityReportingService : IActivityReportingService
                 PendingBranches: regionMetrics.PendingCount,
                 CompletionPercentage: regionMetrics.CompletionPercentage,
                 IsEmptyPopulation: regionMetrics.IsEmpty,
-                IsFullyCompleted: regionMetrics.IsFullyCompleted));
+                IsFullyCompleted: regionMetrics.IsFullyCompleted,
+                PendingReasons: CalculatePendingReasons(regionGroup.ToList())));
         }
 
         return result;
+    }
+
+    private static IReadOnlyList<PendingReasonCountDto> CalculatePendingReasons(
+        IReadOnlyList<BranchReportDetailDto> branches)
+    {
+        var pendingBranches = branches
+            .Where(b => b.CurrentStatus == BranchActivityStatus.Pending)
+            .ToList();
+
+        if (pendingBranches.Count == 0)
+        {
+            return Array.Empty<PendingReasonCountDto>();
+        }
+
+        int totalPending = pendingBranches.Count;
+
+        return pendingBranches
+            .GroupBy(b => b.PendingReason ?? PendingReasonCode.None)
+            .Select(g =>
+            {
+                var code = g.Key;
+                var name = code.ToDisplayName();
+                var count = g.Count();
+                var pct = Math.Round((decimal)count * 100m / totalPending, 2, MidpointRounding.AwayFromZero);
+                return new PendingReasonCountDto(code, name, count, pct);
+            })
+            .OrderByDescending(r => r.BranchCount)
+            .ThenBy(r => r.ReasonName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private static MetricsResult CalculateMetrics(IReadOnlyList<BranchReportDetailDto> branches)

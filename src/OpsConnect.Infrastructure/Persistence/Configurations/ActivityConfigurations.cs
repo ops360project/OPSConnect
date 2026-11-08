@@ -46,6 +46,8 @@ public class ActivityStatusConfiguration : IEntityTypeConfiguration<ActivityStat
 
         builder.HasKey(x => x.ActivityStatusId);
         builder.Property(x => x.CurrentStatus).HasConversion<string>().HasMaxLength(30).IsRequired();
+        builder.Property(x => x.CurrentPendingReason).HasConversion<string>().HasMaxLength(50);
+        builder.Property(x => x.CurrentPendingReasonDescription).HasMaxLength(500);
         builder.Property(x => x.LastUpdatedByDisplayName).HasMaxLength(200);
         builder.Property(x => x.CreatedBy).HasMaxLength(100);
         builder.Property(x => x.UpdatedBy).HasMaxLength(100);
@@ -57,6 +59,9 @@ public class ActivityStatusConfiguration : IEntityTypeConfiguration<ActivityStat
 
         builder.HasIndex(x => new { x.ActivityId, x.ReportingDate, x.CurrentStatus })
             .HasDatabaseName("IX_ActivityStatus_Activity_Date_Status");
+
+        builder.HasIndex(x => new { x.ActivityId, x.ReportingDate, x.CurrentPendingReason })
+            .HasDatabaseName("IX_ActivityStatus_Activity_Date_PendingReason");
 
         builder.HasOne(x => x.Activity)
             .WithMany(a => a.ActivityStatuses)
@@ -80,6 +85,8 @@ public class ActivityHistoryConfiguration : IEntityTypeConfiguration<ActivityHis
         builder.Property(x => x.PreviousStatus).HasConversion<string>().HasMaxLength(30).IsRequired();
         builder.Property(x => x.NewStatus).HasConversion<string>().HasMaxLength(30).IsRequired();
         builder.Property(x => x.Outcome).HasConversion<string>().HasMaxLength(30).IsRequired();
+        builder.Property(x => x.PendingReason).HasConversion<string>().HasMaxLength(50);
+        builder.Property(x => x.PendingReasonDescription).HasMaxLength(500);
         builder.Property(x => x.TelegramUsername).HasMaxLength(150);
         builder.Property(x => x.TelegramDisplayName).HasMaxLength(200);
         builder.Property(x => x.Notes).HasMaxLength(1000);

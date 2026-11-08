@@ -47,6 +47,15 @@ public sealed record ReportingFilterQuery
 }
 
 /// <summary>
+/// Aggregated count and percentage breakdown for a specific pending reason.
+/// </summary>
+public sealed record PendingReasonCountDto(
+    PendingReasonCode ReasonCode,
+    string ReasonName,
+    int BranchCount,
+    decimal PercentageOfPending);
+
+/// <summary>
 /// Top-level summary for an activity on a specific reporting date.
 /// </summary>
 public sealed record ActivityReportSummaryDto(
@@ -67,7 +76,8 @@ public sealed record ActivityReportSummaryDto(
     int TotalZones,
     int TotalStates,
     int TotalRegions,
-    IReadOnlyList<ZoneReportSummaryDto> Zones)
+    IReadOnlyList<ZoneReportSummaryDto> Zones,
+    IReadOnlyList<PendingReasonCountDto>? PendingReasons = null)
 {
     /// <summary>
     /// Section 2 invariant: Pending count = Pending + NotReported.
@@ -90,7 +100,8 @@ public sealed record ZoneReportSummaryDto(
     decimal CompletionPercentage,
     bool IsEmptyPopulation,
     bool IsFullyCompleted,
-    IReadOnlyList<StateReportSummaryDto>? States = null)
+    IReadOnlyList<StateReportSummaryDto>? States = null,
+    IReadOnlyList<PendingReasonCountDto>? PendingReasons = null)
 {
     /// <summary>
     /// Section 2 invariant: Pending count = Pending + NotReported.
@@ -116,7 +127,8 @@ public sealed record StateReportSummaryDto(
     decimal CompletionPercentage,
     bool IsEmptyPopulation,
     bool IsFullyCompleted,
-    IReadOnlyList<RegionReportSummaryDto>? Regions = null)
+    IReadOnlyList<RegionReportSummaryDto>? Regions = null,
+    IReadOnlyList<PendingReasonCountDto>? PendingReasons = null)
 {
     /// <summary>
     /// Section 2 invariant: Pending count = Pending + NotReported.
@@ -144,7 +156,8 @@ public sealed record RegionReportSummaryDto(
     int PendingBranches,
     decimal CompletionPercentage,
     bool IsEmptyPopulation,
-    bool IsFullyCompleted)
+    bool IsFullyCompleted,
+    IReadOnlyList<PendingReasonCountDto>? PendingReasons = null)
 {
     /// <summary>
     /// Section 2 invariant: Pending count = Pending + NotReported.
@@ -176,7 +189,9 @@ public sealed record BranchReportDetailDto(
     long? LastTelegramMessageLogId,
     long? LastUpdatedByTelegramUserId,
     string? LastUpdatedByDisplayName,
-    DateTime? LastUpdatedAtUtc);
+    DateTime? LastUpdatedAtUtc,
+    PendingReasonCode? PendingReason = null,
+    string? PendingReasonDescription = null);
 
 /// <summary>
 /// Paginated or filtered response for branch status details.

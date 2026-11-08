@@ -104,6 +104,7 @@ public class ActivityHandlerAndContractsTests
             Activity- rffo
             BranchID- 36:01
             Status- Pending
+            Reason- CashShortage
             """;
 
         var rffoResult = await processor.ProcessRawMessageAsync(new RawActivityMessageSubmissionRequest(
@@ -186,7 +187,8 @@ public class ActivityHandlerAndContractsTests
         var getDataCommand = new ActivityUpdateSubmissionCommand(
             ActivityCode: "GETDATA",
             BranchCode: "36:01",
-            IncomingStatus: BranchActivityStatus.Pending);
+            IncomingStatus: BranchActivityStatus.Pending,
+            PendingReason: PendingReasonCode.CashShortage);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             rffoHandler.ProcessUpdateAsync(getDataCommand));

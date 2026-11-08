@@ -9,6 +9,8 @@ public sealed partial class TelegramActivityMessageParser : ITelegramActivityMes
     public const string ActivityFieldName = "Activity";
     public const string BranchIdFieldName = "BranchID";
     public const string StatusFieldName = "Status";
+    public const string ReasonFieldName = "Reason";
+    public const string DescriptionFieldName = "Description";
 
     // Matches a field key (letters, spaces, underscores) up to the FIRST '-' or ':' separator,
     // preserving the entire remainder of the line (including any colons in branch codes like '36:01') as the value.
@@ -70,7 +72,7 @@ public sealed partial class TelegramActivityMessageParser : ITelegramActivityMes
                     FieldName: rawKey,
                     RawValue: rawLine.Trim(),
                     ErrorCode: TelegramMessageParseErrorCode.UnrecognisedLine,
-                    Message: $"Line {lineNumber} contains unrecognised field '{rawKey}'. Only Activity, BranchID, and Status are permitted."));
+                    Message: $"Line {lineNumber} contains unrecognised field '{rawKey}'. Only Activity, BranchID, Status, Reason, and Description are permitted."));
                 continue;
             }
 
@@ -206,6 +208,101 @@ public sealed partial class TelegramActivityMessageParser : ITelegramActivityMes
                 Message: $"Status '{statusEntry.RawValue}' on line {statusEntry.LineNumber} is not supported. Only 'Pending' and 'Completed' are allowed."));
         }
 
+        PendingReasonCode? parsedPendingReason = null;
+        string? parsedDescription = null;
+        string? rawReasonValue = null;
+        string? rawDescriptionValue = null;
+
+        firstFieldOccurrences.TryGetValue(ReasonFieldName, out var reasonEntry);
+        firstFieldOccurrences.TryGetValue(DescriptionFieldName, out var descEntry);
+
+        rawReasonValue = reasonEntry.RawValue;
+        rawDescriptionValue = descEntry.RawValue;
+
+        if (parsedStatus == BranchActivityStatus.Pending)
+        {
+            if (!firstFieldOccurrences.ContainsKey(ReasonFieldName))
+            {
+                errors.Add(new TelegramMessageParseError(
+                    LineNumber: null,
+                    FieldName: ReasonFieldName,
+                    RawValue: null,
+                    ErrorCode: TelegramMessageParseErrorCode.MissingPendingReason,
+                    Message: "Required field 'Reason' is missing for Status: Pending. Valid reason codes are: CashShortage, SystemOutage, CustomerDelay, FieldExecutiveOnLeave, OperationalIssue, Other."));
+            }
+            else if (string.IsNullOrWhiteSpace(reasonEntry.RawValue))
+            {
+                errors.Add(new TelegramMessageParseError(
+                    LineNumber: reasonEntry.LineNumber,
+                    FieldName: ReasonFieldName,
+                    RawValue: reasonEntry.RawValue,
+                    ErrorCode: TelegramMessageParseErrorCode.InvalidPendingReason,
+                    Message: $"Reason on line {reasonEntry.LineNumber} cannot be empty for Status: Pending."));
+            }
+            else if (!PendingReasonHelper.TryParse(reasonEntry.RawValue, out var reasonCode))
+            {
+                errors.Add(new TelegramMessageParseError(
+                    LineNumber: reasonEntry.LineNumber,
+                    FieldName: ReasonFieldName,
+                    RawValue: reasonEntry.RawValue,
+                    ErrorCode: TelegramMessageParseErrorCode.InvalidPendingReason,
+                    Message: $"Pending reason '{reasonEntry.RawValue}' on line {reasonEntry.LineNumber} is not valid. Valid reason codes are: CashShortage, SystemOutage, CustomerDelay, FieldExecutiveOnLeave, OperationalIssue, Other."));
+            }
+            else
+            {
+                parsedPendingReason = reasonCode;
+
+                if (reasonCode == PendingReasonCode.Other)
+                {
+                    if (string.IsNullOrWhiteSpace(descEntry.RawValue))
+                    {
+                        errors.Add(new TelegramMessageParseError(
+                            LineNumber: descEntry.LineNumber != 0 ? descEntry.LineNumber : reasonEntry.LineNumber,
+                            FieldName: DescriptionFieldName,
+                            RawValue: descEntry.RawValue,
+                            ErrorCode: TelegramMessageParseErrorCode.MissingPendingReasonDescription,
+                            Message: $"Description is mandatory when reason is 'Other' (line {reasonEntry.LineNumber})."));
+                    }
+                }
+            }
+
+            if (descEntry.RawValue is not null)
+            {
+                if (descEntry.RawValue.Length > PendingReasonHelper.MaxDescriptionLength)
+                {
+                    errors.Add(new TelegramMessageParseError(
+                        LineNumber: descEntry.LineNumber,
+                        FieldName: DescriptionFieldName,
+                        RawValue: descEntry.RawValue,
+                        ErrorCode: TelegramMessageParseErrorCode.PendingReasonDescriptionTooLong,
+                        Message: $"Description on line {descEntry.LineNumber} exceeds maximum length of {PendingReasonHelper.MaxDescriptionLength} characters."));
+                }
+                else
+                {
+                    parsedDescription = string.IsNullOrWhiteSpace(descEntry.RawValue) ? null : descEntry.RawValue.Trim();
+                }
+            }
+        }
+        else if (parsedStatus == BranchActivityStatus.Completed)
+        {
+            if (descEntry.RawValue is not null)
+            {
+                if (descEntry.RawValue.Length > PendingReasonHelper.MaxDescriptionLength)
+                {
+                    errors.Add(new TelegramMessageParseError(
+                        LineNumber: descEntry.LineNumber,
+                        FieldName: DescriptionFieldName,
+                        RawValue: descEntry.RawValue,
+                        ErrorCode: TelegramMessageParseErrorCode.PendingReasonDescriptionTooLong,
+                        Message: $"Description on line {descEntry.LineNumber} exceeds maximum length of {PendingReasonHelper.MaxDescriptionLength} characters."));
+                }
+                else
+                {
+                    parsedDescription = string.IsNullOrWhiteSpace(descEntry.RawValue) ? null : descEntry.RawValue.Trim();
+                }
+            }
+        }
+
         if (errors.Count > 0 ||
             normalizedActivityCode is null ||
             normalizedBranchCode is null ||
@@ -220,7 +317,11 @@ public sealed partial class TelegramActivityMessageParser : ITelegramActivityMes
             Status: parsedStatus.Value,
             RawActivityValue: activityEntry.RawValue,
             RawBranchValue: branchEntry.RawValue,
-            RawStatusValue: statusEntry.RawValue);
+            RawStatusValue: statusEntry.RawValue,
+            PendingReason: parsedPendingReason,
+            PendingReasonDescription: parsedDescription,
+            RawReasonValue: rawReasonValue,
+            RawDescriptionValue: rawDescriptionValue);
 
         return new TelegramMessageParseResult(
             IsSuccess: true,
@@ -237,6 +338,8 @@ public sealed partial class TelegramActivityMessageParser : ITelegramActivityMes
             "ACTIVITY" or "ACTIVITYCODE" => ActivityFieldName,
             "BRANCHID" or "BRANCHCODE" or "BRANCH" => BranchIdFieldName,
             "STATUS" => StatusFieldName,
+            "REASON" or "PENDINGREASON" or "REASONCODE" or "PENDINGREASONCODE" => ReasonFieldName,
+            "DESCRIPTION" or "REASONDESCRIPTION" or "PENDINGREASONDESCRIPTION" or "REMARKS" or "REMARK" => DescriptionFieldName,
             _ => null
         };
     }

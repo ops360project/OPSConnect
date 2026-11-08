@@ -203,7 +203,9 @@ public sealed class ActivityUpdateProcessor : IActivityUpdateProcessor
             SenderUsername: request.SenderUsername,
             SenderDisplayName: request.SenderDisplayName,
             OccurredAtUtc: request.OccurredAtUtc,
-            ExplicitReportingDate: request.ExplicitReportingDate);
+            ExplicitReportingDate: request.ExplicitReportingDate,
+            PendingReason: parsed.PendingReason,
+            PendingReasonDescription: parsed.PendingReasonDescription);
 
         return await ProcessParsedUpdateAsync(command, cancellationToken);
     }

@@ -221,7 +221,7 @@ public class ActivityApiIntegrationTests
         Assert.IsType<UnauthorizedObjectResult>(unauthRead.Result);
 
         var unauthSubmit = await unauthStatusCtrl.SubmitActivityUpdate(
-            new SubmitActivityUpdateApiRequest("Activity : RFFO\nBranch Code : 36:01\nStatus : Pending"));
+            new SubmitActivityUpdateApiRequest("Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage"));
         Assert.IsType<UnauthorizedObjectResult>(unauthSubmit.Result);
 
         var unauthConfig = await unauthConfigCtrl.CreateOrUpdateActivity(
@@ -232,7 +232,7 @@ public class ActivityApiIntegrationTests
         var (_, viewerStatusCtrl, viewerConfigCtrl) = CreateControllers(context, username: "viewer.user", role: SystemRoles.Viewer);
 
         var forbidSubmit = await viewerStatusCtrl.SubmitActivityUpdate(
-            new SubmitActivityUpdateApiRequest("Activity : RFFO\nBranch Code : 36:01\nStatus : Pending"));
+            new SubmitActivityUpdateApiRequest("Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage"));
         Assert.IsType<ForbidResult>(forbidSubmit.Result);
 
         var forbidGrant = await viewerStatusCtrl.GrantReopenPermission(
@@ -298,7 +298,7 @@ public class ActivityApiIntegrationTests
 
             // 2. Submit RFFO Pending for 36:01 (200 OK)
             var submitPending3601 = await adminStatusCtrl.SubmitActivityUpdate(new SubmitActivityUpdateApiRequest(
-                RawMessageText: "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                RawMessageText: "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage",
                 ActivityCode: "RFFO",
                 TelegramMessageLogId: 50001,
                 TelegramChatId: -100999,
@@ -332,7 +332,7 @@ public class ActivityApiIntegrationTests
 
             // 4. Duplicate submission with same TelegramMessageLogId = 50002 -> 409 Conflict (DuplicateIgnored)
             var duplicateSubmission = await adminStatusCtrl.SubmitActivityUpdate(new SubmitActivityUpdateApiRequest(
-                RawMessageText: "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending",
+                RawMessageText: "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending\nReason : CashShortage",
                 TelegramMessageLogId: 50002,
                 ReportingDate: Day1));
 
@@ -348,13 +348,13 @@ public class ActivityApiIntegrationTests
             var mismatchedActivityResp = await adminStatusCtrl.SubmitActivityUpdateForActivity(
                 "RFFO",
                 new SubmitActivityUpdateApiRequest(
-                    RawMessageText: "Activity : GETDATA\nBranch Code : 36:01\nStatus : Pending"));
+                    RawMessageText: "Activity : GETDATA\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage"));
             var mismatchBadReq = Assert.IsType<BadRequestObjectResult>(mismatchedActivityResp.Result);
             var mismatchPayload = Assert.IsType<ActivityUpdateProcessingResult>(mismatchBadReq.Value);
             Assert.Equal(MessageProcessingStatus.RejectedInvalidFormat, mismatchPayload.ProcessingStatus);
 
             var unsupportedGetDataResp = await adminStatusCtrl.SubmitActivityUpdate(new SubmitActivityUpdateApiRequest(
-                RawMessageText: "Activity : GETDATA\nBranch Code : 36:01\nStatus : Pending",
+                RawMessageText: "Activity : GETDATA\nBranch Code : 36:01\nStatus : Pending\nReason : CashShortage",
                 ActivityCode: "GETDATA",
                 ReportingDate: Day1));
             var unsupportedBadReq = Assert.IsType<BadRequestObjectResult>(unsupportedGetDataResp.Result);
@@ -393,7 +393,7 @@ public class ActivityApiIntegrationTests
 
             // 8. Reject Completed -> Pending on 36:02 without reopen permission (400 Bad Request)
             var unauthorizedRevertResp = await adminStatusCtrl.SubmitActivityUpdate(new SubmitActivityUpdateApiRequest(
-                RawMessageText: "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending",
+                RawMessageText: "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending\nReason : CashShortage",
                 TelegramMessageLogId: 50003,
                 ReportingDate: Day1));
             var revertBadReq = Assert.IsType<BadRequestObjectResult>(unauthorizedRevertResp.Result);
@@ -424,7 +424,7 @@ public class ActivityApiIntegrationTests
 
             // 10. Consume permission via Completed -> Pending submission on 36:02 (200 OK, Reopened)
             var reopenSubmitResp = await adminStatusCtrl.SubmitActivityUpdate(new SubmitActivityUpdateApiRequest(
-                RawMessageText: "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending",
+                RawMessageText: "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending\nReason : CashShortage",
                 TelegramMessageLogId: 50004,
                 TelegramUserId: 8002,
                 ReportingDate: Day1));
