@@ -490,6 +490,73 @@ public class ReportingController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>
+    /// Evaluates whether all branches have completed and immediately generates and delivers the final report.
+    /// </summary>
+    [HttpPost("{activityCode}/dispatch-final")]
+    [HttpPost("dispatch-final")]
+    [Authorize(Policy = AuthorizationPolicies.ActivityManage)]
+    [ProducesResponseType(typeof(ImmediateFinalReportResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<ActionResult<ImmediateFinalReportResult>> TriggerFinalDispatch(
+        [FromRoute] string? activityCode = null,
+        [FromQuery] string? queryActivityCode = null,
+        [FromQuery] DateOnly? reportingDate = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (User?.Identity?.IsAuthenticated != true)
+        {
+            return Unauthorized();
+        }
+
+        if (!User.IsInRole(SystemRoles.SuperAdmin) && !User.IsInRole(SystemRoles.Admin))
+        {
+            return Forbid();
+        }
+
+        if (_scheduledReportingService is null)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Status = StatusCodes.Status400BadRequest,
+                Title = "Service Unavailable",
+                Detail = "Scheduled reporting service is not configured."
+            });
+        }
+
+        try
+        {
+            string resolvedCode = ResolveActivityCode(activityCode, queryActivityCode);
+            var result = await _scheduledReportingService.ExecuteImmediateFinalReportAsync(
+                resolvedCode,
+                reportingDate,
+                cancellationToken);
+
+            return Ok(result);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new ProblemDetails
+            {
+                Status = StatusCodes.Status404NotFound,
+                Title = "Activity Not Found",
+                Detail = ex.Message
+            });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Status = StatusCodes.Status400BadRequest,
+                Title = "Invalid Request",
+                Detail = ex.Message
+            });
+        }
+    }
+
     private ActionResult? ValidateAuthorization()
     {
         if (User?.Identity?.IsAuthenticated != true)

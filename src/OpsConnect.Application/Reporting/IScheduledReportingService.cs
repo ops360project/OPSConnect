@@ -30,6 +30,15 @@ public interface IScheduledReportingService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Evaluates whether all active mapped branches have reached Completed status for the given activity and date,
+    /// generating and delivering an immediate final report snapshot and closing the reporting cycle.
+    /// </summary>
+    Task<ImmediateFinalReportResult> ExecuteImmediateFinalReportAsync(
+        string activityCode,
+        DateOnly? reportingDate = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Retrieves the scheduled reporting slots and their delivery records for an activity on a specific reporting date.
     /// </summary>
     Task<IReadOnlyList<ScheduledSlotStatusDto>> GetScheduledSlotsAsync(

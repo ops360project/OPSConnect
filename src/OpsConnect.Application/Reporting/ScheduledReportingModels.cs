@@ -42,7 +42,28 @@ public sealed record ScheduledReportingCycleStatusDto(
     int DeliveredSlots,
     int FailedSlots,
     int SkippedSlots,
-    DateTime? CompletedAtUtc);
+    DateTime? CompletedAtUtc,
+    int CompletionSequenceNumber = 0,
+    DateTime? LastReactivatedAtUtc = null,
+    int? LastReactivatedByBranchId = null);
+
+public sealed record ImmediateFinalReportResult(
+    bool IsTriggered,
+    long? ReportId,
+    int ActivityId,
+    string ActivityCode,
+    DateOnly ReportingDate,
+    int CompletionSequenceNumber,
+    ReportingCycleStatus CycleStatus,
+    ReportDeliveryStatus DeliveryStatus,
+    int TotalActiveBranches,
+    int CompletedBranches,
+    int DestinationGroupsTargeted,
+    int DestinationGroupsDelivered,
+    int MessagePartsSent,
+    bool IsIdempotentRetry,
+    string? StatusNotes,
+    string? ErrorMessage);
 
 public sealed record ScheduledSlotStatusDto(
     long ReportingSlotId,

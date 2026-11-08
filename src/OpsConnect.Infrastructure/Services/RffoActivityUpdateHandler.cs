@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using OpsConnect.Application.Activities.Common;
 using OpsConnect.Application.Activities.RFFO;
 using OpsConnect.Application.Common;
+using OpsConnect.Application.Reporting;
 using OpsConnect.Domain.Activities;
 using OpsConnect.Domain.Administration;
 using OpsConnect.Domain.Reporting;
@@ -20,14 +21,20 @@ public sealed class RffoActivityUpdateHandler : ActivityUpdateHandlerBase, IRffo
 {
     private readonly OpsConnectDbContext _dbContext;
     private readonly IBusinessClock _businessClock;
+    private readonly IScheduledReportingService? _scheduledReportingService;
+    private readonly IActivityReportingService? _reportingService;
 
     public RffoActivityUpdateHandler(
         OpsConnectDbContext dbContext,
-        IBusinessClock businessClock)
+        IBusinessClock businessClock,
+        IScheduledReportingService? scheduledReportingService = null,
+        IActivityReportingService? reportingService = null)
         : base(RffoActivityDescriptor.ActivityCode)
     {
         _dbContext = dbContext;
         _businessClock = businessClock;
+        _scheduledReportingService = scheduledReportingService;
+        _reportingService = reportingService;
     }
 
     protected override async Task<ActivityUpdateProcessingResult> HandleValidatedUpdateAsync(
@@ -340,10 +347,31 @@ public sealed class RffoActivityUpdateHandler : ActivityUpdateHandlerBase, IRffo
             transition.DidStatusChange &&
             transition.NewStatus == BranchActivityStatus.Completed)
         {
-            didTriggerFinalCondition = await CheckAllActiveBranchesCompletedAsync(
-                activity.ActivityId,
-                reportingDate,
-                cancellationToken);
+            if (_scheduledReportingService is not null)
+            {
+                var finalResult = await _scheduledReportingService.ExecuteImmediateFinalReportAsync(
+                    activity.ActivityCode,
+                    reportingDate,
+                    cancellationToken);
+
+                didTriggerFinalCondition = finalResult.IsTriggered;
+            }
+            else
+            {
+                var reportingSvc = _reportingService ?? new ActivityReportingService(_dbContext, _businessClock);
+                var summary = await reportingSvc.GetActivitySummaryReportAsync(
+                    new ReportingFilterQuery
+                    {
+                        ActivityCode = activity.ActivityCode,
+                        ReportingDate = reportingDate
+                    },
+                    cancellationToken);
+
+                didTriggerFinalCondition = summary.TotalBranches > 0 &&
+                                           summary.CompletedBranches == summary.TotalBranches &&
+                                           summary.SubmittedPendingBranches == 0 &&
+                                           summary.NotReportedBranches == 0;
+            }
         }
 
         var processingStatus = transition.Outcome switch
@@ -402,40 +430,6 @@ public sealed class RffoActivityUpdateHandler : ActivityUpdateHandlerBase, IRffo
 
         var openConfig = configs.FirstOrDefault(c => c.EffectiveTo == null) ?? configs[0];
         return openConfig.TimeZoneId;
-    }
-
-    private async Task<bool> CheckAllActiveBranchesCompletedAsync(
-        int activityId,
-        DateOnly reportingDate,
-        CancellationToken cancellationToken)
-    {
-        var activeBranchIds = await _dbContext.Branches
-            .AsNoTracking()
-            .Where(b => b.IsActive &&
-                        b.Zone.IsActive &&
-                        b.State.IsActive &&
-                        b.Region.IsActive &&
-                        b.MappingHistories.Any(h =>
-                            h.EffectiveFromDate <= reportingDate &&
-                            (h.EffectiveToDate == null || h.EffectiveToDate >= reportingDate)))
-            .Select(b => b.BranchId)
-            .ToListAsync(cancellationToken);
-
-        if (activeBranchIds.Count == 0)
-        {
-            return false;
-        }
-
-        var completedCount = await _dbContext.ActivityStatuses
-            .AsNoTracking()
-            .CountAsync(
-                s => s.ActivityId == activityId &&
-                     s.ReportingDate == reportingDate &&
-                     s.CurrentStatus == BranchActivityStatus.Completed &&
-                     activeBranchIds.Contains(s.BranchId),
-                cancellationToken);
-
-        return completedCount == activeBranchIds.Count;
     }
 
     private static string BuildHistoryNotes(

@@ -105,6 +105,33 @@ public sealed class ScheduledReportingService : IScheduledReportingService
 
             cyclesEnsured++;
 
+            // If cycle is already Completed/Closed, do not dispatch further ordinary scheduled reports.
+            if (cycle.CycleStatus == ReportingCycleStatus.Completed)
+            {
+                continue;
+            }
+
+            // If an uncompleted final report exists (or all branches reached completion),
+            // retry/complete the final report delivery rather than dispatching ordinary scheduled slots.
+            var hasPendingFinal = await _dbContext.SummaryLogs
+                .AnyAsync(s => s.ReportingCycleId == cycle.ReportingCycleId &&
+                               s.TriggerType == ReportingTriggerType.ImmediateFinalAllCompleted &&
+                               s.Deliveries.Any(d => d.DeliveryStatus != ReportDeliveryStatus.Delivered),
+                          cancellationToken);
+
+            if (hasPendingFinal)
+            {
+                var finalResult = await ExecuteImmediateFinalReportAsync(
+                    activity.ActivityCode,
+                    reportingDate,
+                    cancellationToken);
+
+                if (finalResult.CycleStatus == ReportingCycleStatus.Completed)
+                {
+                    continue;
+                }
+            }
+
             // 3. Find due slots
             var candidateSlots = await _dbContext.ReportingSlots
                 .Where(s => s.ReportingCycleId == cycle.ReportingCycleId &&
@@ -282,7 +309,10 @@ public sealed class ScheduledReportingService : IScheduledReportingService
             DeliveredSlots: cycle.Slots.Count(s => s.SlotStatus == ReportDeliveryStatus.Delivered),
             FailedSlots: cycle.Slots.Count(s => s.SlotStatus == ReportDeliveryStatus.Failed),
             SkippedSlots: cycle.Slots.Count(s => s.SlotStatus is ReportDeliveryStatus.SkippedAllCompleted or ReportDeliveryStatus.CancelledByConfiguration),
-            CompletedAtUtc: cycle.CompletedAtUtc);
+            CompletedAtUtc: cycle.CompletedAtUtc,
+            CompletionSequenceNumber: cycle.CompletionSequenceNumber,
+            LastReactivatedAtUtc: cycle.LastReactivatedAtUtc,
+            LastReactivatedByBranchId: cycle.LastReactivatedByBranchId);
     }
 
     public async Task<IReadOnlyList<ScheduledSlotStatusDto>> GetScheduledSlotsAsync(
@@ -618,25 +648,441 @@ public sealed class ScheduledReportingService : IScheduledReportingService
         }
 
         // 3. Deliver to each destination group tracking multipart delivery and confirmed IDs
+        var deliveryOutcome = await DeliverReportToDestinationsAsync(
+            existingSummary,
+            messageParts,
+            destinationGroups,
+            nowUtc,
+            cancellationToken);
+
+        // 4. Update overall slot status
+        if (deliveryOutcome.AllDelivered)
+        {
+            slot.SlotStatus = ReportDeliveryStatus.Delivered;
+            slot.StatusNotes = $"Successfully delivered to {deliveryOutcome.DeliveredCount} destination group(s).";
+        }
+        else
+        {
+            slot.SlotStatus = ReportDeliveryStatus.Failed;
+            slot.StatusNotes = $"Delivered to {deliveryOutcome.DeliveredCount} of {destinationGroups.Count} destination group(s); retry pending.";
+        }
+
+        slot.UpdatedAtUtc = nowUtc;
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return new SlotExecutionResult(
+            ReportingSlotId: slot.ReportingSlotId,
+            ActivityId: slot.ActivityId,
+            ActivityCode: activity.ActivityCode,
+            ReportingDate: slot.ReportingDate,
+            ScheduledSlotTime: slot.ScheduledSlotTime,
+            Status: slot.SlotStatus,
+            TotalBranches: totalBranches,
+            CompletedBranches: completedBranches,
+            CompletionPercentage: completionPercentage,
+            DestinationGroupsTargeted: destinationGroups.Count,
+            DestinationGroupsDelivered: deliveryOutcome.DeliveredCount,
+            MessagePartsSent: deliveryOutcome.PartsSent,
+            IsIdempotentRetry: isIdempotentRetry,
+            StatusNotes: slot.StatusNotes,
+            ErrorMessage: deliveryOutcome.AllDelivered ? null : (deliveryOutcome.LastError ?? slot.StatusNotes));
+    }
+
+    public async Task<ImmediateFinalReportResult> ExecuteImmediateFinalReportAsync(
+        string activityCode,
+        DateOnly? reportingDate = null,
+        CancellationToken cancellationToken = default)
+    {
+        var nowUtc = _businessClock.UtcNow;
+        var normalizedCode = ActivityMaster.ValidateActivityCode(activityCode);
+
+        var activity = await _dbContext.Activities
+            .SingleOrDefaultAsync(a => a.ActivityCode == normalizedCode, cancellationToken)
+            ?? throw new KeyNotFoundException($"Activity '{normalizedCode}' was not found.");
+
+        if (!activity.IsActive)
+        {
+            return new ImmediateFinalReportResult(
+                IsTriggered: false,
+                ReportId: null,
+                ActivityId: activity.ActivityId,
+                ActivityCode: activity.ActivityCode,
+                ReportingDate: reportingDate ?? _businessClock.GetBusinessDate(ActivityReportingConfiguration.DefaultTimeZoneId),
+                CompletionSequenceNumber: 0,
+                CycleStatus: ReportingCycleStatus.StoppedManually,
+                DeliveryStatus: ReportDeliveryStatus.CancelledByConfiguration,
+                TotalActiveBranches: 0,
+                CompletedBranches: 0,
+                DestinationGroupsTargeted: 0,
+                DestinationGroupsDelivered: 0,
+                MessagePartsSent: 0,
+                IsIdempotentRetry: false,
+                StatusNotes: $"Activity '{activity.ActivityCode}' is inactive.",
+                ErrorMessage: null);
+        }
+
+        var configs = await _dbContext.ActivityReportingConfigurations
+            .AsNoTracking()
+            .Where(c => c.ActivityId == activity.ActivityId)
+            .OrderByDescending(c => c.EffectiveFrom)
+            .ToListAsync(cancellationToken);
+
+        var targetDate = reportingDate ?? _businessClock.GetBusinessDate(
+            configs.FirstOrDefault()?.TimeZoneId ?? ActivityReportingConfiguration.DefaultTimeZoneId);
+
+        var effectiveConfig = configs.FirstOrDefault(c => c.IsEffectiveOn(targetDate));
+        if (effectiveConfig is null || !effectiveConfig.IsReportingEnabled)
+        {
+            return new ImmediateFinalReportResult(
+                IsTriggered: false,
+                ReportId: null,
+                ActivityId: activity.ActivityId,
+                ActivityCode: activity.ActivityCode,
+                ReportingDate: targetDate,
+                CompletionSequenceNumber: 0,
+                CycleStatus: ReportingCycleStatus.StoppedManually,
+                DeliveryStatus: ReportDeliveryStatus.CancelledByConfiguration,
+                TotalActiveBranches: 0,
+                CompletedBranches: 0,
+                DestinationGroupsTargeted: 0,
+                DestinationGroupsDelivered: 0,
+                MessagePartsSent: 0,
+                IsIdempotentRetry: false,
+                StatusNotes: "Reporting configuration is disabled or not effective for this date.",
+                ErrorMessage: null);
+        }
+
+        // 1. Ensure durable ReportingCycle and daily ReportingSlot instances exist
+        var cycle = await EnsureDailyReportingCycleAndSlotsAsync(
+            activity,
+            effectiveConfig,
+            targetDate,
+            nowUtc,
+            cancellationToken);
+
+        if (cycle is null)
+        {
+            throw new InvalidOperationException($"Failed to ensure reporting cycle for {activity.ActivityCode} on {targetDate}.");
+        }
+
+        // 2. If cycle is already Completed, return or retry the immutable snapshot for this completion sequence
+        if (cycle.CycleStatus == ReportingCycleStatus.Completed && cycle.CompletionSequenceNumber > 0)
+        {
+            var finalKey = SummaryLog.BuildImmediateFinalIdempotencyKey(
+                activity.ActivityId,
+                targetDate,
+                cycle.CompletionSequenceNumber);
+
+            var existingFinal = await _dbContext.SummaryLogs
+                .Include(s => s.Deliveries)
+                .SingleOrDefaultAsync(s => s.IdempotencyKey == finalKey, cancellationToken);
+
+            if (existingFinal is not null)
+            {
+                var destGroups = await _dbContext.TelegramGroups
+                    .Where(g => g.ActivityId == activity.ActivityId &&
+                                g.GroupRole == TelegramGroupRole.Destination &&
+                                g.IsActive)
+                    .ToListAsync(cancellationToken);
+
+                var parts = SplitPersistedContentIntoParts(existingFinal.FormattedReportContent);
+                var outcome = await DeliverReportToDestinationsAsync(existingFinal, parts, destGroups, nowUtc, cancellationToken);
+
+                return new ImmediateFinalReportResult(
+                    IsTriggered: true,
+                    ReportId: existingFinal.ReportId,
+                    ActivityId: activity.ActivityId,
+                    ActivityCode: activity.ActivityCode,
+                    ReportingDate: targetDate,
+                    CompletionSequenceNumber: cycle.CompletionSequenceNumber,
+                    CycleStatus: ReportingCycleStatus.Completed,
+                    DeliveryStatus: outcome.AllDelivered ? ReportDeliveryStatus.Delivered : ReportDeliveryStatus.Failed,
+                    TotalActiveBranches: existingFinal.TotalActiveBranches,
+                    CompletedBranches: existingFinal.CompletedBranches,
+                    DestinationGroupsTargeted: destGroups.Count,
+                    DestinationGroupsDelivered: outcome.DeliveredCount,
+                    MessagePartsSent: outcome.PartsSent,
+                    IsIdempotentRetry: true,
+                    StatusNotes: $"Immutable final report for closed cycle (SEQ {cycle.CompletionSequenceNumber}).",
+                    ErrorMessage: outcome.LastError);
+            }
+        }
+
+        // 3. Recalculate summary using IActivityReportingService
+        var summaryDto = await _reportingService.GetActivitySummaryReportAsync(
+            new ReportingFilterQuery
+            {
+                ActivityCode = activity.ActivityCode,
+                ReportingDate = targetDate
+            },
+            cancellationToken);
+
+        // 4. Validate completion invariants:
+        // - Active mapped branch population is non-empty
+        // - Completed equals Total active branches
+        // - Pending and NotReported are both zero
+        if (summaryDto.TotalBranches <= 0)
+        {
+            return new ImmediateFinalReportResult(
+                IsTriggered: false,
+                ReportId: null,
+                ActivityId: activity.ActivityId,
+                ActivityCode: activity.ActivityCode,
+                ReportingDate: targetDate,
+                CompletionSequenceNumber: 0,
+                CycleStatus: ReportingCycleStatus.Active,
+                DeliveryStatus: ReportDeliveryStatus.Pending,
+                TotalActiveBranches: 0,
+                CompletedBranches: 0,
+                DestinationGroupsTargeted: 0,
+                DestinationGroupsDelivered: 0,
+                MessagePartsSent: 0,
+                IsIdempotentRetry: false,
+                StatusNotes: "Empty branch population: automatic final report condition not met.",
+                ErrorMessage: null);
+        }
+
+        if (summaryDto.CompletedBranches != summaryDto.TotalBranches ||
+            summaryDto.SubmittedPendingBranches > 0 ||
+            summaryDto.NotReportedBranches > 0)
+        {
+            return new ImmediateFinalReportResult(
+                IsTriggered: false,
+                ReportId: null,
+                ActivityId: activity.ActivityId,
+                ActivityCode: activity.ActivityCode,
+                ReportingDate: targetDate,
+                CompletionSequenceNumber: 0,
+                CycleStatus: ReportingCycleStatus.Active,
+                DeliveryStatus: ReportDeliveryStatus.Pending,
+                TotalActiveBranches: summaryDto.TotalBranches,
+                CompletedBranches: summaryDto.CompletedBranches,
+                DestinationGroupsTargeted: 0,
+                DestinationGroupsDelivered: 0,
+                MessagePartsSent: 0,
+                IsIdempotentRetry: false,
+                StatusNotes: $"Incomplete branches ({summaryDto.CompletedBranches}/{summaryDto.TotalBranches} completed, {summaryDto.SubmittedPendingBranches} pending, {summaryDto.NotReportedBranches} not reported).",
+                ErrorMessage: null);
+        }
+
+        // 5. Determine target sequence number
+        // If cycle is already Completed: reuse existing CompletionSequenceNumber (retry)
+        // If cycle is Active: target sequence is CompletionSequenceNumber + 1 (first completion or post-reopen completion)
+        int targetSequence = cycle.CycleStatus == ReportingCycleStatus.Completed
+            ? cycle.CompletionSequenceNumber
+            : cycle.CompletionSequenceNumber + 1;
+
+        if (targetSequence <= 0)
+        {
+            targetSequence = 1;
+        }
+
+        var idempotencyKey = SummaryLog.BuildImmediateFinalIdempotencyKey(
+            activity.ActivityId,
+            targetDate,
+            targetSequence);
+
+        // 6. Check if immutable SummaryLog already exists
+        var existingSummary = await _dbContext.SummaryLogs
+            .Include(s => s.Deliveries)
+            .SingleOrDefaultAsync(s => s.IdempotencyKey == idempotencyKey, cancellationToken);
+
+        bool isIdempotentRetry = false;
+        IReadOnlyList<string> messageParts;
+
+        if (existingSummary is null)
+        {
+            var branchDetails = await _reportingService.GetBranchReportDetailsAsync(
+                new ReportingFilterQuery
+                {
+                    ActivityCode = activity.ActivityCode,
+                    ReportingDate = targetDate
+                },
+                cancellationToken);
+
+            var formatted = _reportFormatter.FormatActivitySummary(
+                summaryDto,
+                branchDetails.Branches,
+                new TelegramReportFormattingOptions
+                {
+                    TimeZoneId = effectiveConfig.TimeZoneId
+                });
+
+            messageParts = formatted.Messages;
+
+            existingSummary = new SummaryLog
+            {
+                ReportingCycleId = cycle.ReportingCycleId,
+                ActivityId = activity.ActivityId,
+                ReportingDate = targetDate,
+                TriggerType = ReportingTriggerType.ImmediateFinalAllCompleted,
+                ScheduledSlotTime = null,
+                IdempotencyKey = idempotencyKey,
+                TotalActiveBranches = summaryDto.TotalBranches,
+                CompletedBranches = summaryDto.CompletedBranches,
+                PendingBranches = summaryDto.SubmittedPendingBranches,
+                NotReportedBranches = summaryDto.NotReportedBranches,
+                CompletionPercentage = summaryDto.CompletionPercentage,
+                FormattedReportContent = string.Join("\n\n---\n\n", messageParts),
+                GeneratedAtUtc = nowUtc,
+                TriggeredBy = "ImmediateFinalReport"
+            };
+
+            _dbContext.SummaryLogs.Add(existingSummary);
+
+            try
+            {
+                await _dbContext.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException ex)
+            {
+                _logger.LogWarning(ex, "Duplicate SummaryLog creation for final report {IdempotencyKey}; re-reading existing snapshot.", idempotencyKey);
+                _dbContext.Entry(existingSummary).State = EntityState.Detached;
+
+                existingSummary = await _dbContext.SummaryLogs
+                    .Include(s => s.Deliveries)
+                    .SingleOrDefaultAsync(s => s.IdempotencyKey == idempotencyKey, cancellationToken)
+                    ?? throw new InvalidOperationException("Failed to persist or retrieve immutable SummaryLog for final report.");
+
+                isIdempotentRetry = true;
+                messageParts = SplitPersistedContentIntoParts(existingSummary.FormattedReportContent);
+            }
+        }
+        else
+        {
+            isIdempotentRetry = true;
+            messageParts = SplitPersistedContentIntoParts(existingSummary.FormattedReportContent);
+        }
+
+        // 6. Deliver to active destination groups
+        var destinationGroups = await _dbContext.TelegramGroups
+            .Where(g => g.ActivityId == activity.ActivityId &&
+                        g.GroupRole == TelegramGroupRole.Destination &&
+                        g.IsActive)
+            .ToListAsync(cancellationToken);
+
+        if (destinationGroups.Count == 0)
+        {
+            return new ImmediateFinalReportResult(
+                IsTriggered: true,
+                ReportId: existingSummary.ReportId,
+                ActivityId: activity.ActivityId,
+                ActivityCode: activity.ActivityCode,
+                ReportingDate: targetDate,
+                CompletionSequenceNumber: targetSequence,
+                CycleStatus: cycle.CycleStatus,
+                DeliveryStatus: ReportDeliveryStatus.Failed,
+                TotalActiveBranches: existingSummary.TotalActiveBranches,
+                CompletedBranches: existingSummary.CompletedBranches,
+                DestinationGroupsTargeted: 0,
+                DestinationGroupsDelivered: 0,
+                MessagePartsSent: 0,
+                IsIdempotentRetry: isIdempotentRetry,
+                StatusNotes: "No active Telegram destination group configured for this activity.",
+                ErrorMessage: "No active Telegram destination group configured.");
+        }
+
+        var deliveryOutcome = await DeliverReportToDestinationsAsync(
+            existingSummary,
+            messageParts,
+            destinationGroups,
+            nowUtc,
+            cancellationToken);
+
+        // 7. Cycle closure if and only if all destination groups delivered
+        if (deliveryOutcome.AllDelivered)
+        {
+            if (cycle.CycleStatus == ReportingCycleStatus.Active)
+            {
+                cycle.TryCompleteWhenAllBranchesCompleted(
+                    existingSummary.TotalActiveBranches,
+                    existingSummary.CompletedBranches,
+                    nowUtc);
+
+                try
+                {
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                }
+                catch (DbUpdateConcurrencyException ex)
+                {
+                    _logger.LogWarning(ex, "ReportingCycle concurrency conflict while closing cycle {CycleId}; cycle was closed by another concurrent worker.", cycle.ReportingCycleId);
+                    await _dbContext.Entry(cycle).ReloadAsync(cancellationToken);
+                }
+            }
+
+            return new ImmediateFinalReportResult(
+                IsTriggered: true,
+                ReportId: existingSummary.ReportId,
+                ActivityId: activity.ActivityId,
+                ActivityCode: activity.ActivityCode,
+                ReportingDate: targetDate,
+                CompletionSequenceNumber: cycle.CompletionSequenceNumber,
+                CycleStatus: cycle.CycleStatus,
+                DeliveryStatus: ReportDeliveryStatus.Delivered,
+                TotalActiveBranches: existingSummary.TotalActiveBranches,
+                CompletedBranches: existingSummary.CompletedBranches,
+                DestinationGroupsTargeted: destinationGroups.Count,
+                DestinationGroupsDelivered: deliveryOutcome.DeliveredCount,
+                MessagePartsSent: deliveryOutcome.PartsSent,
+                IsIdempotentRetry: isIdempotentRetry,
+                StatusNotes: $"Immediate final report delivered to {deliveryOutcome.DeliveredCount} destination group(s); cycle closed.",
+                ErrorMessage: null);
+        }
+        else
+        {
+            return new ImmediateFinalReportResult(
+                IsTriggered: true,
+                ReportId: existingSummary.ReportId,
+                ActivityId: activity.ActivityId,
+                ActivityCode: activity.ActivityCode,
+                ReportingDate: targetDate,
+                CompletionSequenceNumber: targetSequence,
+                CycleStatus: cycle.CycleStatus,
+                DeliveryStatus: ReportDeliveryStatus.Failed,
+                TotalActiveBranches: existingSummary.TotalActiveBranches,
+                CompletedBranches: existingSummary.CompletedBranches,
+                DestinationGroupsTargeted: destinationGroups.Count,
+                DestinationGroupsDelivered: deliveryOutcome.DeliveredCount,
+                MessagePartsSent: deliveryOutcome.PartsSent,
+                IsIdempotentRetry: isIdempotentRetry,
+                StatusNotes: $"Immediate final report delivery failed ({deliveryOutcome.DeliveredCount}/{destinationGroups.Count} delivered); cycle remains Active for retry.",
+                ErrorMessage: deliveryOutcome.LastError);
+        }
+    }
+
+    private sealed record ReportDeliveryOutcome(
+        bool AllDelivered,
+        int DeliveredCount,
+        int PartsSent,
+        string? LastError);
+
+    private async Task<ReportDeliveryOutcome> DeliverReportToDestinationsAsync(
+        SummaryLog summary,
+        IReadOnlyList<string> messageParts,
+        IReadOnlyList<TelegramGroup> destinationGroups,
+        DateTime nowUtc,
+        CancellationToken cancellationToken)
+    {
         int deliveredGroupsCount = 0;
         int totalPartsSent = 0;
         bool anyFailed = false;
+        string? lastError = null;
 
         foreach (var destGroup in destinationGroups)
         {
-            string deliveryKey = ReportDeliveryLog.BuildDeliveryIdempotencyKey(idempotencyKey, destGroup.TelegramGroupId);
+            string deliveryKey = ReportDeliveryLog.BuildDeliveryIdempotencyKey(summary.IdempotencyKey, destGroup.TelegramGroupId);
 
-            var delivery = existingSummary.Deliveries.FirstOrDefault(d => d.IdempotencyKey == deliveryKey)
+            var delivery = summary.Deliveries.FirstOrDefault(d => d.IdempotencyKey == deliveryKey)
                 ?? await _dbContext.ReportDeliveryLogs.SingleOrDefaultAsync(d => d.IdempotencyKey == deliveryKey, cancellationToken);
 
             if (delivery is null)
             {
                 delivery = new ReportDeliveryLog
                 {
-                    ReportId = existingSummary.ReportId,
-                    ActivityId = slot.ActivityId,
-                    ReportingDate = slot.ReportingDate,
-                    ScheduledSlotTime = slot.ScheduledSlotTime,
+                    ReportId = summary.ReportId,
+                    ActivityId = summary.ActivityId,
+                    ReportingDate = summary.ReportingDate,
+                    ScheduledSlotTime = summary.ScheduledSlotTime,
                     DestinationGroupId = destGroup.TelegramGroupId,
                     DestinationTelegramChatId = destGroup.TelegramChatId,
                     IdempotencyKey = deliveryKey,
@@ -646,11 +1092,24 @@ public sealed class ScheduledReportingService : IScheduledReportingService
                 };
 
                 _dbContext.ReportDeliveryLogs.Add(delivery);
-                if (!existingSummary.Deliveries.Contains(delivery))
+                if (!summary.Deliveries.Contains(delivery))
                 {
-                    existingSummary.Deliveries.Add(delivery);
+                    summary.Deliveries.Add(delivery);
                 }
-                await _dbContext.SaveChangesAsync(cancellationToken);
+
+                try
+                {
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                }
+                catch (DbUpdateException ex)
+                {
+                    _logger.LogWarning(ex, "Duplicate ReportDeliveryLog insertion detected for {DeliveryKey}; reloading existing delivery log.", deliveryKey);
+                    _dbContext.Entry(delivery).State = EntityState.Detached;
+
+                    delivery = await _dbContext.ReportDeliveryLogs
+                        .SingleOrDefaultAsync(d => d.IdempotencyKey == deliveryKey, cancellationToken)
+                        ?? throw new InvalidOperationException($"Failed to reload ReportDeliveryLog for key {deliveryKey}.");
+                }
             }
 
             if (delivery.DeliveryStatus == ReportDeliveryStatus.Delivered)
@@ -660,10 +1119,8 @@ public sealed class ScheduledReportingService : IScheduledReportingService
             }
 
             // Multipart recovery: inspect already confirmed Telegram message IDs
-            // If parts 1..K were sent, resume from part K+1
             var confirmedIds = ParseDeliveredMessageIds(delivery.DeliveredTelegramMessageIds);
             int startPartIndex = confirmedIds.Count;
-
             bool destGroupFailed = false;
 
             for (int i = startPartIndex; i < messageParts.Count; i++)
@@ -685,6 +1142,7 @@ public sealed class ScheduledReportingService : IScheduledReportingService
                     destGroupFailed = true;
                     anyFailed = true;
                     string sanitizedErr = SanitizeError(sendResult.ErrorMessage ?? "Telegram send error.");
+                    lastError = sanitizedErr;
                     delivery.RecordFailedAttempt(sanitizedErr, nowUtc);
                     await _dbContext.SaveChangesAsync(cancellationToken);
                     break;
@@ -694,42 +1152,24 @@ public sealed class ScheduledReportingService : IScheduledReportingService
             if (!destGroupFailed && confirmedIds.Count == messageParts.Count)
             {
                 delivery.MarkDelivered(string.Join(",", confirmedIds), nowUtc);
-                await _dbContext.SaveChangesAsync(cancellationToken);
+                try
+                {
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                }
+                catch (DbUpdateConcurrencyException ex)
+                {
+                    _logger.LogWarning(ex, "ReportDeliveryLog concurrency conflict on delivery {DeliveryId}; reloading state.", delivery.ReportDeliveryId);
+                    await _dbContext.Entry(delivery).ReloadAsync(cancellationToken);
+                }
                 deliveredGroupsCount++;
             }
         }
 
-        // 4. Update overall slot status
-        if (!anyFailed && deliveredGroupsCount == destinationGroups.Count)
-        {
-            slot.SlotStatus = ReportDeliveryStatus.Delivered;
-            slot.StatusNotes = $"Successfully delivered to {deliveredGroupsCount} destination group(s).";
-        }
-        else
-        {
-            slot.SlotStatus = ReportDeliveryStatus.Failed;
-            slot.StatusNotes = $"Delivered to {deliveredGroupsCount} of {destinationGroups.Count} destination group(s); retry pending.";
-        }
-
-        slot.UpdatedAtUtc = nowUtc;
-        await _dbContext.SaveChangesAsync(cancellationToken);
-
-        return new SlotExecutionResult(
-            ReportingSlotId: slot.ReportingSlotId,
-            ActivityId: slot.ActivityId,
-            ActivityCode: activity.ActivityCode,
-            ReportingDate: slot.ReportingDate,
-            ScheduledSlotTime: slot.ScheduledSlotTime,
-            Status: slot.SlotStatus,
-            TotalBranches: totalBranches,
-            CompletedBranches: completedBranches,
-            CompletionPercentage: completionPercentage,
-            DestinationGroupsTargeted: destinationGroups.Count,
-            DestinationGroupsDelivered: deliveredGroupsCount,
-            MessagePartsSent: totalPartsSent,
-            IsIdempotentRetry: isIdempotentRetry,
-            StatusNotes: slot.StatusNotes,
-            ErrorMessage: anyFailed ? slot.StatusNotes : null);
+        return new ReportDeliveryOutcome(
+            AllDelivered: !anyFailed && deliveredGroupsCount == destinationGroups.Count,
+            DeliveredCount: deliveredGroupsCount,
+            PartsSent: totalPartsSent,
+            LastError: lastError);
     }
 
     private static IReadOnlyList<string> SplitPersistedContentIntoParts(string content)
