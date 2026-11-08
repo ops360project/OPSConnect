@@ -229,7 +229,9 @@ public enum TelegramUpdateHandlingOutcome
     RejectedUnauthorizedSecret = 4,
     RejectedOversizedPayload = 5,
     RejectedMalformedPayload = 6,
-    RejectedUnauthorizedSourceGroup = 7
+    RejectedUnauthorizedSourceGroup = 7,
+    DuplicateIgnored = 8,
+    FailedPersistence = 9
 }
 
 public sealed record TelegramUpdateNormalizationResult(
@@ -270,7 +272,19 @@ public sealed record TelegramGroupAuthorizationResult(
     TelegramGroupRole? GroupRole,
     string? AuthorizationSource,
     IReadOnlyList<string> AuthorizedActivityCodes,
-    string? RejectionReason);
+    string? RejectionReason,
+    int? SourceTelegramGroupId = null,
+    string? SourceGroupTitle = null,
+    int? DefaultActivityId = null);
+
+public sealed record TelegramMessageIngestionResult(
+    bool IsPersistedOrDuplicate,
+    bool IsDuplicate,
+    long? TelegramMessageLogId,
+    MessageProcessingStatus? ProcessingStatus,
+    DateTime? ReceivedAtUtc,
+    string? ErrorCode,
+    string? ErrorMessage);
 
 public sealed record TelegramWebhookHandlingResult(
     bool IsSuccess,
@@ -282,7 +296,10 @@ public sealed record TelegramWebhookHandlingResult(
     string? ErrorCode,
     string Message,
     NormalizedTelegramMessageEnvelope? NormalizedEnvelope = null,
-    IReadOnlyList<string>? AuthorizedActivityCodes = null);
+    IReadOnlyList<string>? AuthorizedActivityCodes = null,
+    long? TelegramMessageLogId = null,
+    MessageProcessingStatus? PersistedProcessingStatus = null,
+    DateTime? ReceivedAtUtc = null);
 
 public sealed record TelegramBotSendResult(
     bool IsSuccess,

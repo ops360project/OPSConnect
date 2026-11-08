@@ -1,11 +1,12 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using OpsConnect.Domain.Telegram;
 
 namespace OpsConnect.Application.Telegram;
 
 /// <summary>
 /// Coordinates Telegram webhook security verification, payload size enforcement, JSON deserialization,
-/// update normalisation, and Open Group Mode source-group authorisation.
+/// update normalisation, Open Group Mode source-group authorisation, and durable message ingestion.
 /// </summary>
 public sealed class TelegramWebhookReceiver : ITelegramWebhookReceiver
 {
@@ -18,19 +19,23 @@ public sealed class TelegramWebhookReceiver : ITelegramWebhookReceiver
     private readonly IOptionsMonitor<TelegramBotOptions> _optionsMonitor;
     private readonly ITelegramUpdateNormalizer _updateNormalizer;
     private readonly ITelegramGroupAuthorizationService _groupAuthorizationService;
+    private readonly ITelegramMessageIngestionService _messageIngestionService;
 
     public TelegramWebhookReceiver(
         IOptionsMonitor<TelegramBotOptions> optionsMonitor,
         ITelegramUpdateNormalizer updateNormalizer,
-        ITelegramGroupAuthorizationService groupAuthorizationService)
+        ITelegramGroupAuthorizationService groupAuthorizationService,
+        ITelegramMessageIngestionService messageIngestionService)
     {
         ArgumentNullException.ThrowIfNull(optionsMonitor);
         ArgumentNullException.ThrowIfNull(updateNormalizer);
         ArgumentNullException.ThrowIfNull(groupAuthorizationService);
+        ArgumentNullException.ThrowIfNull(messageIngestionService);
 
         _optionsMonitor = optionsMonitor;
         _updateNormalizer = updateNormalizer;
         _groupAuthorizationService = groupAuthorizationService;
+        _messageIngestionService = messageIngestionService;
     }
 
     public async Task<TelegramWebhookHandlingResult> ReceiveWebhookAsync(
@@ -150,13 +155,64 @@ public sealed class TelegramWebhookReceiver : ITelegramWebhookReceiver
 
         var envelope = normalization.Envelope;
 
-        // 6. Open Group Mode source-group authorisation (checks authorised group Chat ID; any member inside is permitted)
-        var groupAuth = await _groupAuthorizationService.AuthorizeSourceGroupAsync(
-            envelope.TelegramChatId,
-            cancellationToken);
+        // 6. Open Group Mode source-group authorisation (Database-First Precedence over static configuration)
+        TelegramGroupAuthorizationResult groupAuth;
+        try
+        {
+            groupAuth = await _groupAuthorizationService.AuthorizeSourceGroupAsync(
+                envelope.TelegramChatId,
+                cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new TelegramWebhookHandlingResult(
+                IsSuccess: false,
+                Outcome: TelegramUpdateHandlingOutcome.FailedPersistence,
+                RecommendedHttpStatusCode: 503,
+                UpdateId: envelope.UpdateId,
+                TelegramChatId: envelope.TelegramChatId,
+                TelegramMessageId: envelope.TelegramMessageId,
+                ErrorCode: "WebhookPersistenceUnavailable",
+                Message: "Temporary service error while validating Telegram source group; please retry.");
+        }
 
         if (!groupAuth.IsAuthorized)
         {
+            var rejectedIngestion = await _messageIngestionService.RecordRejectedGroupMessageAsync(
+                envelope,
+                groupAuth,
+                cancellationToken);
+
+            if (!rejectedIngestion.IsPersistedOrDuplicate)
+            {
+                return new TelegramWebhookHandlingResult(
+                    IsSuccess: false,
+                    Outcome: TelegramUpdateHandlingOutcome.FailedPersistence,
+                    RecommendedHttpStatusCode: 503,
+                    UpdateId: envelope.UpdateId,
+                    TelegramChatId: envelope.TelegramChatId,
+                    TelegramMessageId: envelope.TelegramMessageId,
+                    ErrorCode: rejectedIngestion.ErrorCode ?? "WebhookPersistenceUnavailable",
+                    Message: rejectedIngestion.ErrorMessage ?? "Temporary service error while persisting Telegram update; please retry.");
+            }
+
+            if (rejectedIngestion.IsDuplicate)
+            {
+                return new TelegramWebhookHandlingResult(
+                    IsSuccess: true,
+                    Outcome: TelegramUpdateHandlingOutcome.DuplicateIgnored,
+                    RecommendedHttpStatusCode: 200,
+                    UpdateId: envelope.UpdateId,
+                    TelegramChatId: envelope.TelegramChatId,
+                    TelegramMessageId: envelope.TelegramMessageId,
+                    ErrorCode: null,
+                    Message: "Duplicate Telegram webhook delivery recognised and safely ignored.",
+                    NormalizedEnvelope: envelope,
+                    TelegramMessageLogId: rejectedIngestion.TelegramMessageLogId,
+                    PersistedProcessingStatus: rejectedIngestion.ProcessingStatus,
+                    ReceivedAtUtc: rejectedIngestion.ReceivedAtUtc);
+            }
+
             return new TelegramWebhookHandlingResult(
                 IsSuccess: false,
                 Outcome: TelegramUpdateHandlingOutcome.RejectedUnauthorizedSourceGroup,
@@ -165,7 +221,48 @@ public sealed class TelegramWebhookReceiver : ITelegramWebhookReceiver
                 TelegramChatId: envelope.TelegramChatId,
                 TelegramMessageId: envelope.TelegramMessageId,
                 ErrorCode: "UnauthorizedSourceGroup",
-                Message: groupAuth.RejectionReason ?? $"Telegram chat '{envelope.TelegramChatId}' is not an authorised source group.");
+                Message: groupAuth.RejectionReason ?? $"Telegram chat '{envelope.TelegramChatId}' is not an authorised source group.",
+                NormalizedEnvelope: envelope,
+                TelegramMessageLogId: rejectedIngestion.TelegramMessageLogId,
+                PersistedProcessingStatus: rejectedIngestion.ProcessingStatus,
+                ReceivedAtUtc: rejectedIngestion.ReceivedAtUtc);
+        }
+
+        // 7. Durable atomic ingestion into telegram.TelegramMessageLog
+        var ingestion = await _messageIngestionService.IngestAuthorizedMessageAsync(
+            envelope,
+            groupAuth,
+            cancellationToken);
+
+        if (!ingestion.IsPersistedOrDuplicate)
+        {
+            return new TelegramWebhookHandlingResult(
+                IsSuccess: false,
+                Outcome: TelegramUpdateHandlingOutcome.FailedPersistence,
+                RecommendedHttpStatusCode: 503,
+                UpdateId: envelope.UpdateId,
+                TelegramChatId: envelope.TelegramChatId,
+                TelegramMessageId: envelope.TelegramMessageId,
+                ErrorCode: ingestion.ErrorCode ?? "WebhookPersistenceUnavailable",
+                Message: ingestion.ErrorMessage ?? "Temporary service error while persisting Telegram update; please retry.");
+        }
+
+        if (ingestion.IsDuplicate)
+        {
+            return new TelegramWebhookHandlingResult(
+                IsSuccess: true,
+                Outcome: TelegramUpdateHandlingOutcome.DuplicateIgnored,
+                RecommendedHttpStatusCode: 200,
+                UpdateId: envelope.UpdateId,
+                TelegramChatId: envelope.TelegramChatId,
+                TelegramMessageId: envelope.TelegramMessageId,
+                ErrorCode: null,
+                Message: "Duplicate Telegram webhook delivery recognised and safely ignored.",
+                NormalizedEnvelope: envelope,
+                AuthorizedActivityCodes: groupAuth.AuthorizedActivityCodes,
+                TelegramMessageLogId: ingestion.TelegramMessageLogId,
+                PersistedProcessingStatus: ingestion.ProcessingStatus,
+                ReceivedAtUtc: ingestion.ReceivedAtUtc);
         }
 
         return new TelegramWebhookHandlingResult(
@@ -176,9 +273,12 @@ public sealed class TelegramWebhookReceiver : ITelegramWebhookReceiver
             TelegramChatId: envelope.TelegramChatId,
             TelegramMessageId: envelope.TelegramMessageId,
             ErrorCode: null,
-            Message: "Telegram update validated and source group authorised.",
+            Message: "Telegram update durably ingested and ready for activity processing.",
             NormalizedEnvelope: envelope,
-            AuthorizedActivityCodes: groupAuth.AuthorizedActivityCodes);
+            AuthorizedActivityCodes: groupAuth.AuthorizedActivityCodes,
+            TelegramMessageLogId: ingestion.TelegramMessageLogId,
+            PersistedProcessingStatus: ingestion.ProcessingStatus,
+            ReceivedAtUtc: ingestion.ReceivedAtUtc);
     }
 
     public TelegramBotMaskedDiagnosticsDto GetMaskedConfigurationDiagnostics()

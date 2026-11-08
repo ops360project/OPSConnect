@@ -35,6 +35,7 @@ public class TelegramMessageLogConfiguration : IEntityTypeConfiguration<Telegram
         builder.ToTable("TelegramMessageLog", DatabaseSchemas.Telegram);
 
         builder.HasKey(x => x.TelegramMessageLogId);
+        builder.Property(x => x.SourceGroupTitle).HasMaxLength(250);
         builder.Property(x => x.SenderUsername).HasMaxLength(150);
         builder.Property(x => x.SenderDisplayName).HasMaxLength(200);
         builder.Property(x => x.RawMessageText).HasMaxLength(4000).IsRequired();
@@ -44,7 +45,13 @@ public class TelegramMessageLogConfiguration : IEntityTypeConfiguration<Telegram
         builder.Property(x => x.ProcessingStatus).HasConversion<string>().HasMaxLength(50).IsRequired();
         builder.Property(x => x.RejectionReason).HasMaxLength(1000);
 
-        // Unique duplicate-detection key: Telegram Chat ID + Telegram Message ID
+        // Unique duplicate-detection key 1: Telegram Update ID (when present)
+        builder.HasIndex(x => x.TelegramUpdateId)
+            .IsUnique()
+            .HasFilter("[TelegramUpdateId] IS NOT NULL")
+            .HasDatabaseName("UX_TelegramMessageLog_TelegramUpdateId");
+
+        // Unique duplicate-detection key 2: Telegram Chat ID + Telegram Message ID
         builder.HasIndex(x => new { x.TelegramChatId, x.TelegramMessageId })
             .IsUnique()
             .HasDatabaseName("UX_TelegramMessageLog_ChatId_MessageId");

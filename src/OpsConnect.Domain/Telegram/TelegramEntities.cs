@@ -41,13 +41,17 @@ public class TelegramGroup : ActivatableAuditableEntity
 
 /// <summary>
 /// Complete audit record of every incoming Telegram message.
-/// Duplicate detection uses the composite unique key (TelegramChatId, TelegramMessageId).
+/// Duplicate detection uses both TelegramUpdateId (when present) and the composite unique key (TelegramChatId, TelegramMessageId).
 /// </summary>
 public class TelegramMessageLog
 {
     public long TelegramMessageLogId { get; set; }
+    public long? TelegramUpdateId { get; set; }
     public long TelegramChatId { get; set; }
     public long TelegramMessageId { get; set; }
+
+    public int? SourceTelegramGroupId { get; set; }
+    public string? SourceGroupTitle { get; set; }
 
     public long? TelegramUserId { get; set; }
     public string? SenderUsername { get; set; }

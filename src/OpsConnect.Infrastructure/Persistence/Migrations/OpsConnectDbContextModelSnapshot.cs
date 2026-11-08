@@ -1428,16 +1428,31 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
                         .HasMaxLength(150)
                         .HasColumnType("nvarchar(150)");
 
+                    b.Property<string>("SourceGroupTitle")
+                        .HasMaxLength(250)
+                        .HasColumnType("nvarchar(250)");
+
+                    b.Property<int?>("SourceTelegramGroupId")
+                        .HasColumnType("int");
+
                     b.Property<long>("TelegramChatId")
                         .HasColumnType("bigint");
 
                     b.Property<long>("TelegramMessageId")
                         .HasColumnType("bigint");
 
+                    b.Property<long?>("TelegramUpdateId")
+                        .HasColumnType("bigint");
+
                     b.Property<long?>("TelegramUserId")
                         .HasColumnType("bigint");
 
                     b.HasKey("TelegramMessageLogId");
+
+                    b.HasIndex("TelegramUpdateId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_TelegramMessageLog_TelegramUpdateId")
+                        .HasFilter("[TelegramUpdateId] IS NOT NULL");
 
                     b.HasIndex("TelegramChatId", "TelegramMessageId")
                         .IsUnique()

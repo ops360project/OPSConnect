@@ -46,8 +46,25 @@ public interface ITelegramBotClient
 }
 
 /// <summary>
+/// Persists incoming Telegram messages durably and atomically to telegram.TelegramMessageLog
+/// with database-backed idempotency on TelegramUpdateId and (TelegramChatId, TelegramMessageId).
+/// </summary>
+public interface ITelegramMessageIngestionService
+{
+    Task<TelegramMessageIngestionResult> IngestAuthorizedMessageAsync(
+        NormalizedTelegramMessageEnvelope envelope,
+        TelegramGroupAuthorizationResult groupAuthorization,
+        CancellationToken cancellationToken = default);
+
+    Task<TelegramMessageIngestionResult> RecordRejectedGroupMessageAsync(
+        NormalizedTelegramMessageEnvelope envelope,
+        TelegramGroupAuthorizationResult groupAuthorization,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>
 /// Coordinates Telegram webhook security validation, payload size bounds, JSON deserialization,
-/// update normalisation, and source group authorisation.
+/// update normalisation, source group authorisation, and durable message ingestion.
 /// </summary>
 public interface ITelegramWebhookReceiver
 {

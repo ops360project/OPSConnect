@@ -1,4 +1,3 @@
-using System.Net;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
@@ -9,6 +8,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using OpsConnect.Api.Authentication;
 using OpsConnect.Api.Controllers;
+using OpsConnect.Application.Activities.Common;
+using OpsConnect.Application.Common;
 using OpsConnect.Application.Telegram;
 using OpsConnect.Domain.Administration;
 using OpsConnect.Domain.Telegram;
@@ -23,6 +24,7 @@ public class TelegramWebhookIntegrationTests
     private const string TestBotToken = "987654321:AAF_TestSecretBotTokenValue_987654321";
     private const long ConfiguredSourceChatId = -100555000111;
     private const long DbSourceChatId = -100555000222;
+    private const long InactiveDbGroupChatId = -100555000333;
     private const long UnauthorizedChatId = -100999888777;
 
     private static OpsConnectDbContext CreateContext()
@@ -39,7 +41,7 @@ public class TelegramWebhookIntegrationTests
             WebhookUrl = "https://opsconnect.example.com/api/telegram/webhook",
             WebhookSecretToken = TestSecretToken,
             MaxWebhookPayloadBytes = maxPayloadBytes,
-            AuthorizedSourceChatIds = [ConfiguredSourceChatId],
+            AuthorizedSourceChatIds = [ConfiguredSourceChatId, InactiveDbGroupChatId],
             DestinationChatIds = [-100555000999]
         };
 
@@ -48,12 +50,26 @@ public class TelegramWebhookIntegrationTests
         TelegramBotOptions options,
         string? secretHeaderValue,
         byte[] bodyBytes,
-        ClaimsPrincipal? user = null)
+        ClaimsPrincipal? user = null,
+        IBusinessClock? clock = null,
+        ITelegramMessageIngestionService? customIngestionService = null)
     {
         var optionsMonitor = new StaticOptionsMonitor<TelegramBotOptions>(options);
         var normalizer = new TelegramUpdateNormalizer();
         var groupAuthService = new TelegramGroupAuthorizationService(dbContext, optionsMonitor);
-        var receiver = new TelegramWebhookReceiver(optionsMonitor, normalizer, groupAuthService);
+        var effectiveClock = clock ?? new SystemBusinessClock();
+        var ingestionService = customIngestionService ?? new TelegramMessageIngestionService(
+            dbContext,
+            new TelegramActivityMessageParser(),
+            effectiveClock,
+            optionsMonitor,
+            NullLogger<TelegramMessageIngestionService>.Instance);
+
+        var receiver = new TelegramWebhookReceiver(
+            optionsMonitor,
+            normalizer,
+            groupAuthService,
+            ingestionService);
 
         var httpContext = new DefaultHttpContext
         {
@@ -82,7 +98,7 @@ public class TelegramWebhookIntegrationTests
         JsonSerializer.SerializeToUtf8Bytes(payload);
 
     [Fact]
-    public async Task WebhookEndpoint_ShouldEnforceSecretValidation_PayloadBounds_UpdateStructure_AndSourceGroupAuthorization()
+    public async Task WebhookEndpoint_ShouldPersistAuthorizedMessages_EnforcePrecedence_HandleDuplicates_AndNotChangeRffoStatus()
     {
         await using var context = CreateContext();
         if (!await context.Database.CanConnectAsync())
@@ -95,10 +111,14 @@ public class TelegramWebhookIntegrationTests
         {
             await using var tx = await context.Database.BeginTransactionAsync();
 
+            var fixedReceivedUtc = new DateTime(2026, 11, 8, 7, 30, 0, DateTimeKind.Utc);
+            var fixedClock = new FixedTestClock(fixedReceivedUtc, new DateOnly(2026, 11, 8));
             var rffoActivity = await context.Activities.SingleAsync(a => a.ActivityCode == "RFFO");
 
-            // Seed a database-backed Source TelegramGroup for RFFO
-            context.TelegramGroups.Add(new TelegramGroup
+            // 1. Seed an active DB Source Group and an inactive DB Source Group
+            // Note: InactiveDbGroupChatId IS present in TelegramBotOptions.AuthorizedSourceChatIds,
+            // so this directly verifies that an inactive DB group overrides stale static configuration!
+            var activeDbGroup = new TelegramGroup
             {
                 ActivityId = rffoActivity.ActivityId,
                 TelegramChatId = DbSourceChatId,
@@ -106,7 +126,19 @@ public class TelegramWebhookIntegrationTests
                 GroupRole = TelegramGroupRole.Source,
                 IsActive = true,
                 CreatedBy = "test.admin"
-            });
+            };
+
+            var inactiveDbGroup = new TelegramGroup
+            {
+                ActivityId = rffoActivity.ActivityId,
+                TelegramChatId = InactiveDbGroupChatId,
+                GroupTitle = "Deactivated Legacy Source Group",
+                GroupRole = TelegramGroupRole.Source,
+                IsActive = false,
+                CreatedBy = "test.admin"
+            };
+
+            context.TelegramGroups.AddRange(activeDbGroup, inactiveDbGroup);
             await context.SaveChangesAsync();
 
             var validGroupMessageBytes = SerializeUpdate(new
@@ -121,7 +153,7 @@ public class TelegramWebhookIntegrationTests
                     {
                         id = DbSourceChatId,
                         type = "supergroup",
-                        title = "DB Authorised RFFO Source Group"
+                        title = "Telegram Payload Title"
                     },
                     from = new
                     {
@@ -134,84 +166,77 @@ public class TelegramWebhookIntegrationTests
                 }
             });
 
-            // 1. Missing webhook secret -> 401 Unauthorized
+            // 2. Missing & invalid webhook secrets -> 401 Unauthorized, 0 rows persisted
             var missingSecretCtrl = CreateWebhookController(
                 context,
                 CreateDefaultOptions(),
                 secretHeaderValue: null,
-                bodyBytes: validGroupMessageBytes);
+                bodyBytes: validGroupMessageBytes,
+                clock: fixedClock);
+            var missingResp = await missingSecretCtrl.ReceiveWebhook();
+            Assert.Equal(StatusCodes.Status401Unauthorized, Assert.IsType<ObjectResult>(missingResp.Result).StatusCode);
 
-            var missingSecretResp = await missingSecretCtrl.ReceiveWebhook();
-            var missingObj = Assert.IsType<ObjectResult>(missingSecretResp.Result);
-            Assert.Equal(StatusCodes.Status401Unauthorized, missingObj.StatusCode);
-            var missingPayload = Assert.IsType<TelegramWebhookHandlingResult>(missingObj.Value);
-            Assert.Equal(TelegramUpdateHandlingOutcome.RejectedUnauthorizedSecret, missingPayload.Outcome);
-
-            // 2. Invalid webhook secret -> 401 Unauthorized
             var invalidSecretCtrl = CreateWebhookController(
                 context,
                 CreateDefaultOptions(),
                 secretHeaderValue: "Wrong_Secret_Token_Value_0000",
-                bodyBytes: validGroupMessageBytes);
+                bodyBytes: validGroupMessageBytes,
+                clock: fixedClock);
+            var invalidResp = await invalidSecretCtrl.ReceiveWebhook();
+            Assert.Equal(StatusCodes.Status401Unauthorized, Assert.IsType<ObjectResult>(invalidResp.Result).StatusCode);
+            Assert.Equal(0, await context.TelegramMessageLogs.CountAsync());
 
-            var invalidSecretResp = await invalidSecretCtrl.ReceiveWebhook();
-            var invalidObj = Assert.IsType<ObjectResult>(invalidSecretResp.Result);
-            Assert.Equal(StatusCodes.Status401Unauthorized, invalidObj.StatusCode);
-            var invalidPayload = Assert.IsType<TelegramWebhookHandlingResult>(invalidObj.Value);
-            Assert.Equal(TelegramUpdateHandlingOutcome.RejectedUnauthorizedSecret, invalidPayload.Outcome);
-
-            // 3. Oversized payload -> 413 Payload Too Large
+            // 3. Oversized & malformed payloads -> 413 / 400, 0 rows persisted
             var oversizedBytes = Encoding.UTF8.GetBytes("{\"update_id\":1,\"padding\":\"" + new string('A', 2048) + "\"}");
             var oversizedCtrl = CreateWebhookController(
                 context,
                 CreateDefaultOptions(maxPayloadBytes: 1024),
                 secretHeaderValue: TestSecretToken,
-                bodyBytes: oversizedBytes);
+                bodyBytes: oversizedBytes,
+                clock: fixedClock);
+            Assert.Equal(StatusCodes.Status413PayloadTooLarge, Assert.IsType<ObjectResult>((await oversizedCtrl.ReceiveWebhook()).Result).StatusCode);
 
-            var oversizedResp = await oversizedCtrl.ReceiveWebhook();
-            var oversizedObj = Assert.IsType<ObjectResult>(oversizedResp.Result);
-            Assert.Equal(StatusCodes.Status413PayloadTooLarge, oversizedObj.StatusCode);
-            var oversizedPayload = Assert.IsType<TelegramWebhookHandlingResult>(oversizedObj.Value);
-            Assert.Equal(TelegramUpdateHandlingOutcome.RejectedOversizedPayload, oversizedPayload.Outcome);
-
-            // 4. Malformed JSON payload -> 400 Bad Request
             var malformedCtrl = CreateWebhookController(
                 context,
                 CreateDefaultOptions(),
                 secretHeaderValue: TestSecretToken,
-                bodyBytes: Encoding.UTF8.GetBytes("{not-valid-json"));
+                bodyBytes: Encoding.UTF8.GetBytes("{not-valid-json"),
+                clock: fixedClock);
+            Assert.Equal(StatusCodes.Status400BadRequest, Assert.IsType<ObjectResult>((await malformedCtrl.ReceiveWebhook()).Result).StatusCode);
 
-            var malformedResp = await malformedCtrl.ReceiveWebhook();
-            var malformedObj = Assert.IsType<ObjectResult>(malformedResp.Result);
-            Assert.Equal(StatusCodes.Status400BadRequest, malformedObj.StatusCode);
-            var malformedPayload = Assert.IsType<TelegramWebhookHandlingResult>(malformedObj.Value);
-            Assert.Equal(TelegramUpdateHandlingOutcome.RejectedMalformedPayload, malformedPayload.Outcome);
-
-            // 5. Unsupported update type (callback_query) -> 200 OK (IgnoredNonMessageUpdate)
-            var callbackBytes = SerializeUpdate(new
+            // 4. Unsupported media and service messages -> 200 OK (IgnoredNonMessageUpdate), 0 rows persisted
+            var mediaMessageBytes = SerializeUpdate(new
             {
                 update_id = 100002,
-                callback_query = new { id = "cb-99" }
+                message = new
+                {
+                    message_id = 502,
+                    date = 1762580000,
+                    caption = "Photo without text field",
+                    chat = new { id = DbSourceChatId, type = "supergroup" },
+                    from = new { id = 900123, is_bot = false, first_name = "Suresh" }
+                }
             });
-            var callbackCtrl = CreateWebhookController(
+            var mediaCtrl = CreateWebhookController(
                 context,
                 CreateDefaultOptions(),
                 secretHeaderValue: TestSecretToken,
-                bodyBytes: callbackBytes);
+                bodyBytes: mediaMessageBytes,
+                clock: fixedClock);
+            var mediaObj = Assert.IsType<ObjectResult>((await mediaCtrl.ReceiveWebhook()).Result);
+            Assert.Equal(StatusCodes.Status200OK, mediaObj.StatusCode);
+            Assert.Equal(
+                TelegramUpdateHandlingOutcome.IgnoredNonMessageUpdate,
+                Assert.IsType<TelegramWebhookHandlingResult>(mediaObj.Value).Outcome);
+            Assert.Equal(0, await context.TelegramMessageLogs.CountAsync());
 
-            var callbackResp = await callbackCtrl.ReceiveWebhook();
-            var callbackObj = Assert.IsType<ObjectResult>(callbackResp.Result);
-            Assert.Equal(StatusCodes.Status200OK, callbackObj.StatusCode);
-            var callbackPayload = Assert.IsType<TelegramWebhookHandlingResult>(callbackObj.Value);
-            Assert.Equal(TelegramUpdateHandlingOutcome.IgnoredNonMessageUpdate, callbackPayload.Outcome);
-
-            // 6. Unauthorised source group Chat ID -> 403 Forbidden (RejectedUnauthorizedSourceGroup)
+            // 5. Unauthorised group message -> 403 Forbidden, persisted with RejectedUnauthorisedGroup & RejectionReason
             var unauthorizedGroupBytes = SerializeUpdate(new
             {
                 update_id = 100003,
                 message = new
                 {
-                    message_id = 502,
+                    message_id = 503,
                     date = 1762580000,
                     text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
                     chat = new { id = UnauthorizedChatId, type = "supergroup", title = "Random Unauthorised Group" },
@@ -222,37 +247,284 @@ public class TelegramWebhookIntegrationTests
                 context,
                 CreateDefaultOptions(),
                 secretHeaderValue: TestSecretToken,
-                bodyBytes: unauthorizedGroupBytes);
+                bodyBytes: unauthorizedGroupBytes,
+                clock: fixedClock);
+            var unauthGroupObj = Assert.IsType<ObjectResult>((await unauthorizedGroupCtrl.ReceiveWebhook()).Result);
+            Assert.Equal(StatusCodes.Status403Forbidden, unauthGroupObj.StatusCode);
+            var unauthGroupPayload = Assert.IsType<TelegramWebhookHandlingResult>(unauthGroupObj.Value);
+            Assert.Equal(TelegramUpdateHandlingOutcome.RejectedUnauthorizedSourceGroup, unauthGroupPayload.Outcome);
+            Assert.NotNull(unauthGroupPayload.TelegramMessageLogId);
 
-            var unauthorizedGroupResp = await unauthorizedGroupCtrl.ReceiveWebhook();
-            var unauthorizedGroupObj = Assert.IsType<ObjectResult>(unauthorizedGroupResp.Result);
-            Assert.Equal(StatusCodes.Status403Forbidden, unauthorizedGroupObj.StatusCode);
-            var unauthorizedGroupPayload = Assert.IsType<TelegramWebhookHandlingResult>(unauthorizedGroupObj.Value);
-            Assert.Equal(TelegramUpdateHandlingOutcome.RejectedUnauthorizedSourceGroup, unauthorizedGroupPayload.Outcome);
+            var persistedUnauthLog = await context.TelegramMessageLogs
+                .AsNoTracking()
+                .SingleAsync(x => x.TelegramMessageLogId == unauthGroupPayload.TelegramMessageLogId);
+            Assert.Equal(MessageProcessingStatus.RejectedUnauthorisedGroup, persistedUnauthLog.ProcessingStatus);
+            Assert.NotNull(persistedUnauthLog.RejectionReason);
 
-            // 7. Valid webhook secret + Authorised DB Source Group -> 200 OK (AcceptedForProcessing)
-            // Verify Open Group Mode metadata is captured and NO ActivityStatus/ActivityHistory rows are written in Task 5.1
+            // 6. Inactive DB group (even though Chat ID is in AuthorizedSourceChatIds!) -> 403 Forbidden (Database-First Precedence)
+            var inactiveGroupBytes = SerializeUpdate(new
+            {
+                update_id = 100004,
+                message = new
+                {
+                    message_id = 504,
+                    date = 1762580000,
+                    text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                    chat = new { id = InactiveDbGroupChatId, type = "supergroup", title = "Deactivated Legacy Source Group" },
+                    from = new { id = 900123, is_bot = false, first_name = "Suresh" }
+                }
+            });
+            var inactiveGroupCtrl = CreateWebhookController(
+                context,
+                CreateDefaultOptions(),
+                secretHeaderValue: TestSecretToken,
+                bodyBytes: inactiveGroupBytes,
+                clock: fixedClock);
+            var inactiveGroupObj = Assert.IsType<ObjectResult>((await inactiveGroupCtrl.ReceiveWebhook()).Result);
+            Assert.Equal(StatusCodes.Status403Forbidden, inactiveGroupObj.StatusCode);
+            var inactiveGroupPayload = Assert.IsType<TelegramWebhookHandlingResult>(inactiveGroupObj.Value);
+            Assert.Equal(TelegramUpdateHandlingOutcome.RejectedUnauthorizedSourceGroup, inactiveGroupPayload.Outcome);
+            Assert.Contains("inactive", inactiveGroupPayload.Message, StringComparison.OrdinalIgnoreCase);
+
+            // 7. New authorised group message -> 200 OK (AcceptedForProcessing), durably persisted with all audit fields
             var validDbGroupCtrl = CreateWebhookController(
                 context,
                 CreateDefaultOptions(),
                 secretHeaderValue: TestSecretToken,
-                bodyBytes: validGroupMessageBytes);
-
-            var validDbResp = await validDbGroupCtrl.ReceiveWebhook();
-            var validDbObj = Assert.IsType<ObjectResult>(validDbResp.Result);
+                bodyBytes: validGroupMessageBytes,
+                clock: fixedClock);
+            var validDbObj = Assert.IsType<ObjectResult>((await validDbGroupCtrl.ReceiveWebhook()).Result);
             Assert.Equal(StatusCodes.Status200OK, validDbObj.StatusCode);
             var validDbPayload = Assert.IsType<TelegramWebhookHandlingResult>(validDbObj.Value);
             Assert.True(validDbPayload.IsSuccess);
             Assert.Equal(TelegramUpdateHandlingOutcome.AcceptedForProcessing, validDbPayload.Outcome);
-            Assert.NotNull(validDbPayload.NormalizedEnvelope);
-            Assert.Equal(DbSourceChatId, validDbPayload.NormalizedEnvelope!.TelegramChatId);
-            Assert.Equal(900123, validDbPayload.NormalizedEnvelope.TelegramUserId);
-            Assert.Equal("suresh_3601", validDbPayload.NormalizedEnvelope.SenderUsername);
-            Assert.Equal("Suresh Nayak", validDbPayload.NormalizedEnvelope.SenderDisplayName);
-            Assert.Contains("RFFO", validDbPayload.AuthorizedActivityCodes!);
+            Assert.NotNull(validDbPayload.TelegramMessageLogId);
+            Assert.Equal(MessageProcessingStatus.Received, validDbPayload.PersistedProcessingStatus);
 
+            var persistedAuthorizedLog = await context.TelegramMessageLogs
+                .AsNoTracking()
+                .SingleAsync(x => x.TelegramMessageLogId == validDbPayload.TelegramMessageLogId);
+
+            Assert.Equal(100001, persistedAuthorizedLog.TelegramUpdateId);
+            Assert.Equal(DbSourceChatId, persistedAuthorizedLog.TelegramChatId);
+            Assert.Equal(501, persistedAuthorizedLog.TelegramMessageId);
+            Assert.Equal(activeDbGroup.TelegramGroupId, persistedAuthorizedLog.SourceTelegramGroupId);
+            Assert.Equal("DB Authorised RFFO Source Group", persistedAuthorizedLog.SourceGroupTitle);
+            Assert.Equal(900123, persistedAuthorizedLog.TelegramUserId);
+            Assert.Equal("suresh_3601", persistedAuthorizedLog.SenderUsername);
+            Assert.Equal("Suresh Nayak", persistedAuthorizedLog.SenderDisplayName);
+            Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1762580000).UtcDateTime, persistedAuthorizedLog.MessageTimestampUtc);
+            Assert.Equal(fixedReceivedUtc, persistedAuthorizedLog.ReceivedAtUtc);
+            Assert.Equal("Activity : RFFO\nBranch Code : 36:01\nStatus : Pending", persistedAuthorizedLog.RawMessageText);
+            Assert.Equal("RFFO", persistedAuthorizedLog.ParsedActivityCode);
+            Assert.Equal("36:01", persistedAuthorizedLog.ParsedBranchCode);
+            Assert.Equal("Pending", persistedAuthorizedLog.ParsedStatusText);
+            Assert.Equal(rffoActivity.ActivityId, persistedAuthorizedLog.ActivityId);
+            Assert.Equal(MessageProcessingStatus.Received, persistedAuthorizedLog.ProcessingStatus);
+
+            // 8. Repeated Telegram Update ID (100001) -> 200 OK (DuplicateIgnored), preserves original row
+            var laterClock = new FixedTestClock(fixedReceivedUtc.AddMinutes(5), new DateOnly(2026, 11, 8));
+            var duplicateUpdateIdBytes = SerializeUpdate(new
+            {
+                update_id = 100001,
+                message = new
+                {
+                    message_id = 999,
+                    date = 1762580300,
+                    text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Completed",
+                    chat = new { id = DbSourceChatId, type = "supergroup" },
+                    from = new { id = 900123, is_bot = false, first_name = "Suresh" }
+                }
+            });
+            var dupUpdateIdCtrl = CreateWebhookController(
+                context,
+                CreateDefaultOptions(),
+                secretHeaderValue: TestSecretToken,
+                bodyBytes: duplicateUpdateIdBytes,
+                clock: laterClock);
+            var dupUpdateIdObj = Assert.IsType<ObjectResult>((await dupUpdateIdCtrl.ReceiveWebhook()).Result);
+            Assert.Equal(StatusCodes.Status200OK, dupUpdateIdObj.StatusCode);
+            var dupUpdateIdPayload = Assert.IsType<TelegramWebhookHandlingResult>(dupUpdateIdObj.Value);
+            Assert.Equal(TelegramUpdateHandlingOutcome.DuplicateIgnored, dupUpdateIdPayload.Outcome);
+            Assert.Equal(validDbPayload.TelegramMessageLogId, dupUpdateIdPayload.TelegramMessageLogId);
+
+            // 9. Repeated Chat ID + Message ID (DbSourceChatId + 501) with a new Update ID -> 200 OK (DuplicateIgnored)
+            var duplicateChatMessageBytes = SerializeUpdate(new
+            {
+                update_id = 100099,
+                message = new
+                {
+                    message_id = 501,
+                    date = 1762580300,
+                    text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Completed",
+                    chat = new { id = DbSourceChatId, type = "supergroup" },
+                    from = new { id = 900123, is_bot = false, first_name = "Suresh" }
+                }
+            });
+            var dupChatMsgCtrl = CreateWebhookController(
+                context,
+                CreateDefaultOptions(),
+                secretHeaderValue: TestSecretToken,
+                bodyBytes: duplicateChatMessageBytes,
+                clock: laterClock);
+            var dupChatMsgObj = Assert.IsType<ObjectResult>((await dupChatMsgCtrl.ReceiveWebhook()).Result);
+            Assert.Equal(StatusCodes.Status200OK, dupChatMsgObj.StatusCode);
+            var dupChatMsgPayload = Assert.IsType<TelegramWebhookHandlingResult>(dupChatMsgObj.Value);
+            Assert.Equal(TelegramUpdateHandlingOutcome.DuplicateIgnored, dupChatMsgPayload.Outcome);
+            Assert.Equal(validDbPayload.TelegramMessageLogId, dupChatMsgPayload.TelegramMessageLogId);
+
+            // Verify original message record was NOT overwritten by duplicate deliveries
+            var unchangedOriginal = await context.TelegramMessageLogs
+                .AsNoTracking()
+                .SingleAsync(x => x.TelegramMessageLogId == validDbPayload.TelegramMessageLogId);
+            Assert.Equal(fixedReceivedUtc, unchangedOriginal.ReceivedAtUtc);
+            Assert.Equal("Pending", unchangedOriginal.ParsedStatusText);
+
+            // 10. Confirm zero RFFO status or history changes occurred in Task 5.2
             Assert.Equal(0, await context.ActivityStatuses.CountAsync());
             Assert.Equal(0, await context.ActivityHistories.CountAsync());
+
+            await tx.RollbackAsync();
+        });
+    }
+
+    [Fact]
+    public async Task DatabaseFailure_RetryAfterFailure_AndConcurrentDuplicateRace_ShouldHandleSafely()
+    {
+        await using var context = CreateContext();
+        if (!await context.Database.CanConnectAsync())
+        {
+            return;
+        }
+
+        var strategy = context.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            await using var tx = await context.Database.BeginTransactionAsync();
+
+            var messageBytes = SerializeUpdate(new
+            {
+                update_id = 200001,
+                message = new
+                {
+                    message_id = 701,
+                    date = 1762580000,
+                    text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                    chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Configured Group" },
+                    from = new { id = 8001, is_bot = false, first_name = "Anita", username = "anita_3601" }
+                }
+            });
+
+            // 1. Simulate transient database failure during ingestion -> 503 Service Unavailable (sanitized message)
+            var failingIngestion = new SimulatedTransientFailureIngestionService();
+            var failingCtrl = CreateWebhookController(
+                context,
+                CreateDefaultOptions(),
+                secretHeaderValue: TestSecretToken,
+                bodyBytes: messageBytes,
+                customIngestionService: failingIngestion);
+
+            var failedResp = await failingCtrl.ReceiveWebhook();
+            var failedObj = Assert.IsType<ObjectResult>(failedResp.Result);
+            Assert.Equal(StatusCodes.Status503ServiceUnavailable, failedObj.StatusCode);
+            var failedPayload = Assert.IsType<TelegramWebhookHandlingResult>(failedObj.Value);
+            Assert.False(failedPayload.IsSuccess);
+            Assert.Equal(TelegramUpdateHandlingOutcome.FailedPersistence, failedPayload.Outcome);
+            Assert.DoesNotContain("SqlException", failedPayload.Message, StringComparison.OrdinalIgnoreCase);
+
+            // Verify nothing was persisted during the failed attempt
+            Assert.Equal(0, await context.TelegramMessageLogs.CountAsync());
+
+            // 2. Retry after transient failure resolves -> 200 OK (AcceptedForProcessing) and durably persisted
+            var retryCtrl = CreateWebhookController(
+                context,
+                CreateDefaultOptions(),
+                secretHeaderValue: TestSecretToken,
+                bodyBytes: messageBytes);
+
+            var retryResp = await retryCtrl.ReceiveWebhook();
+            var retryObj = Assert.IsType<ObjectResult>(retryResp.Result);
+            Assert.Equal(StatusCodes.Status200OK, retryObj.StatusCode);
+            var retryPayload = Assert.IsType<TelegramWebhookHandlingResult>(retryObj.Value);
+            Assert.True(retryPayload.IsSuccess);
+            Assert.Equal(TelegramUpdateHandlingOutcome.AcceptedForProcessing, retryPayload.Outcome);
+            Assert.Equal(1, await context.TelegramMessageLogs.CountAsync());
+
+            // 3. Database-level concurrent duplicate delivery race condition:
+            // Insert a row into context for UpdateId=200002, then invoke SaveLogEntry on a second ingestion call
+            // where the row already exists in the database before SaveChangesAsync commits.
+            var raceEnvelope = new NormalizedTelegramMessageEnvelope(
+                UpdateId: 200002,
+                TelegramChatId: ConfiguredSourceChatId,
+                ChatType: "supergroup",
+                ChatTitle: "Configured Group",
+                TelegramMessageId: 702,
+                TelegramUserId: 8001,
+                IsSenderBot: false,
+                SenderUsername: "anita_3601",
+                SenderDisplayName: "Anita",
+                MessageTimestampUtc: DateTimeOffset.FromUnixTimeSeconds(1762580000).UtcDateTime,
+                RawMessageText: "Activity : RFFO\nBranch Code : 36:01\nStatus : Completed");
+
+            var groupAuth = new TelegramGroupAuthorizationResult(
+                IsAuthorized: true,
+                TelegramChatId: ConfiguredSourceChatId,
+                GroupRole: TelegramGroupRole.Source,
+                AuthorizationSource: "Configuration",
+                AuthorizedActivityCodes: ["RFFO"],
+                RejectionReason: null);
+
+            var optionsMonitor = new StaticOptionsMonitor<TelegramBotOptions>(CreateDefaultOptions());
+            var ingestionService = new TelegramMessageIngestionService(
+                context,
+                new TelegramActivityMessageParser(),
+                new SystemBusinessClock(),
+                optionsMonitor,
+                NullLogger<TelegramMessageIngestionService>.Instance);
+
+            var firstIngest = await ingestionService.IngestAuthorizedMessageAsync(raceEnvelope, groupAuth);
+            Assert.True(firstIngest.IsPersistedOrDuplicate);
+            Assert.False(firstIngest.IsDuplicate);
+
+            var secondIngest = await ingestionService.IngestAuthorizedMessageAsync(raceEnvelope, groupAuth);
+            Assert.True(secondIngest.IsPersistedOrDuplicate);
+            Assert.True(secondIngest.IsDuplicate);
+            Assert.Equal(firstIngest.TelegramMessageLogId, secondIngest.TelegramMessageLogId);
+
+            Assert.Equal(
+                1,
+                await context.TelegramMessageLogs.CountAsync(x => x.TelegramUpdateId == 200002));
+
+            // 4. Verify SQL Server unique indexes directly enforce UX_TelegramMessageLog_TelegramUpdateId and UX_TelegramMessageLog_ChatId_MessageId
+            await context.Database.CurrentTransaction!.CreateSavepointAsync("UniqueCheck1");
+            context.TelegramMessageLogs.Add(new TelegramMessageLog
+            {
+                TelegramUpdateId = 200002,
+                TelegramChatId = -100111,
+                TelegramMessageId = 99999,
+                MessageTimestampUtc = DateTime.UtcNow,
+                ReceivedAtUtc = DateTime.UtcNow,
+                RawMessageText = "Duplicate UpdateId direct insert",
+                ProcessingStatus = MessageProcessingStatus.Received
+            });
+            await Assert.ThrowsAsync<DbUpdateException>(() => context.SaveChangesAsync());
+            await context.Database.CurrentTransaction.RollbackToSavepointAsync("UniqueCheck1");
+            context.ChangeTracker.Clear();
+
+            await context.Database.CurrentTransaction.CreateSavepointAsync("UniqueCheck2");
+            context.TelegramMessageLogs.Add(new TelegramMessageLog
+            {
+                TelegramUpdateId = 299999,
+                TelegramChatId = ConfiguredSourceChatId,
+                TelegramMessageId = 702,
+                MessageTimestampUtc = DateTime.UtcNow,
+                ReceivedAtUtc = DateTime.UtcNow,
+                RawMessageText = "Duplicate ChatId+MessageId direct insert",
+                ProcessingStatus = MessageProcessingStatus.Received
+            });
+            await Assert.ThrowsAsync<DbUpdateException>(() => context.SaveChangesAsync());
+            await context.Database.CurrentTransaction.RollbackToSavepointAsync("UniqueCheck2");
+            context.ChangeTracker.Clear();
 
             await tx.RollbackAsync();
         });
@@ -291,7 +563,6 @@ public class TelegramWebhookIntegrationTests
         Assert.DoesNotContain(TestBotToken, JsonSerializer.Serialize(diagnostics), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(TestSecretToken, JsonSerializer.Serialize(diagnostics), StringComparison.OrdinalIgnoreCase);
 
-        // Verify TelegramBotHttpClient masks BotToken when HTTP failure occurs
         using var httpClient = new HttpClient(new FailingTokenEchoHttpMessageHandler());
         var botClient = new TelegramBotHttpClient(
             httpClient,
@@ -303,6 +574,46 @@ public class TelegramWebhookIntegrationTests
         Assert.NotNull(sendResult.ErrorMessage);
         Assert.DoesNotContain(TestBotToken, sendResult.ErrorMessage!, StringComparison.OrdinalIgnoreCase);
         Assert.Contains($"bot{TelegramSecretMasker.MaskedPlaceholder}", sendResult.ErrorMessage!, StringComparison.Ordinal);
+    }
+
+    private sealed class SimulatedTransientFailureIngestionService : ITelegramMessageIngestionService
+    {
+        public Task<TelegramMessageIngestionResult> IngestAuthorizedMessageAsync(
+            NormalizedTelegramMessageEnvelope envelope,
+            TelegramGroupAuthorizationResult groupAuthorization,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new TelegramMessageIngestionResult(
+                IsPersistedOrDuplicate: false,
+                IsDuplicate: false,
+                TelegramMessageLogId: null,
+                ProcessingStatus: null,
+                ReceivedAtUtc: null,
+                ErrorCode: "DatabasePersistenceFailure",
+                ErrorMessage: "Temporary service error while persisting Telegram update; please retry."));
+
+        public Task<TelegramMessageIngestionResult> RecordRejectedGroupMessageAsync(
+            NormalizedTelegramMessageEnvelope envelope,
+            TelegramGroupAuthorizationResult groupAuthorization,
+            CancellationToken cancellationToken = default) =>
+            IngestAuthorizedMessageAsync(envelope, groupAuthorization, cancellationToken);
+    }
+
+    private sealed class FixedTestClock : IBusinessClock
+    {
+        private readonly DateOnly _businessDate;
+
+        public FixedTestClock(DateTime utcNow, DateOnly businessDate)
+        {
+            UtcNow = utcNow;
+            _businessDate = businessDate;
+        }
+
+        public DateTime UtcNow { get; }
+
+        public DateOnly GetBusinessDate(string timeZoneId) => _businessDate;
+
+        public DateTimeOffset ConvertUtcToTimeZone(DateTime utcDateTime, string timeZoneId) =>
+            new(utcDateTime, TimeSpan.Zero);
     }
 
     private sealed class FailingTokenEchoHttpMessageHandler : HttpMessageHandler

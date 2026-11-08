@@ -60,6 +60,7 @@ public class DatabaseFoundationTests
     [InlineData(typeof(ActivityStatus), "UX_ActivityStatus_Activity_Branch_Date")]
     [InlineData(typeof(StatusReopenPermission), "UX_StatusReopenPermission_ActivePerBranchDate")]
     [InlineData(typeof(TelegramMessageLog), "UX_TelegramMessageLog_ChatId_MessageId")]
+    [InlineData(typeof(TelegramMessageLog), "UX_TelegramMessageLog_TelegramUpdateId")]
     [InlineData(typeof(ReportingCycle), "UX_ReportingCycle_Activity_Date")]
     [InlineData(typeof(ReportingSlot), "UX_ReportingSlot_Activity_Date_SlotTime")]
     [InlineData(typeof(SummaryLog), "UX_SummaryLog_IdempotencyKey")]
@@ -155,6 +156,7 @@ public class DatabaseFoundationTests
         Assert.Contains(migrations, m => m.EndsWith("_OrganisationMasterInvariants", StringComparison.Ordinal));
         Assert.Contains(migrations, m => m.EndsWith("_ActivityConfigurationInvariants", StringComparison.Ordinal));
         Assert.Contains(migrations, m => m.EndsWith("_RffoSourceMessageIdempotency", StringComparison.Ordinal));
+        Assert.Contains(migrations, m => m.EndsWith("_TelegramMessageIngestionAndIdempotency", StringComparison.Ordinal));
     }
 
     [Fact]

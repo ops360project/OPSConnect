@@ -37,6 +37,7 @@ public class TelegramWebhookController : ControllerBase
     [ProducesResponseType(typeof(TelegramWebhookHandlingResult), StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(TelegramWebhookHandlingResult), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(TelegramWebhookHandlingResult), StatusCodes.Status413PayloadTooLarge)]
+    [ProducesResponseType(typeof(TelegramWebhookHandlingResult), StatusCodes.Status503ServiceUnavailable)]
     public async Task<ActionResult<TelegramWebhookHandlingResult>> ReceiveWebhook(
         CancellationToken cancellationToken = default)
     {
