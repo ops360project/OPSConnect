@@ -12,6 +12,7 @@ public static class DependencyInjection
         services.AddSingleton<IBusinessClock, SystemBusinessClock>();
         services.AddSingleton<IOrganisationHierarchyImportValidator, OrganisationHierarchyImportValidator>();
         services.AddSingleton<ITelegramActivityMessageParser, TelegramActivityMessageParser>();
+        services.AddScoped<IActivityUpdateProcessor, ActivityUpdateProcessor>();
         return services;
     }
 }
