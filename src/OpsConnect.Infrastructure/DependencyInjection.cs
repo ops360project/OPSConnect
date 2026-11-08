@@ -48,6 +48,7 @@ public static class DependencyInjection
         services.AddScoped<IStatusReopenPermissionService, StatusReopenPermissionService>();
         services.AddScoped<IActivityConfigurationService, ActivityConfigurationService>();
         services.AddScoped<IActivityReportingService, ActivityReportingService>();
+        services.AddSingleton<ITelegramReportFormatter, TelegramReportFormatter>();
 
         services.AddOptions<TelegramBotOptions>()
             .Configure(options => BindTelegramBotOptions(configuration, options))
