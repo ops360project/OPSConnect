@@ -159,6 +159,7 @@ public class DatabaseFoundationTests
         Assert.Contains(migrations, m => m.EndsWith("_RffoSourceMessageIdempotency", StringComparison.Ordinal));
         Assert.Contains(migrations, m => m.EndsWith("_TelegramMessageIngestionAndIdempotency", StringComparison.Ordinal));
         Assert.Contains(migrations, m => m.EndsWith("_TelegramMessageProcessingConcurrencyAndState", StringComparison.Ordinal));
+        Assert.Contains(migrations, m => m.EndsWith("_TelegramSubmissionAcknowledgementTracking", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -61,7 +61,8 @@ public sealed class TelegramBotHttpClient : ITelegramBotClient
         {
             chat_id = chatId,
             text = text.Trim(),
-            reply_to_message_id = replyToMessageId
+            reply_to_message_id = replyToMessageId,
+            allow_sending_without_reply = replyToMessageId.HasValue ? true : (bool?)null
         };
 
         return await PostTelegramRequestAsync(endpoint, payload, options, cancellationToken);
@@ -133,11 +134,24 @@ public sealed class TelegramBotHttpClient : ITelegramBotClient
                     statusCode,
                     sanitizedBody);
 
+                int? retryAfterSeconds = TryExtractRetryAfterSeconds(body, response);
+                bool isTransient = statusCode == 429 || statusCode == 408 || statusCode >= 500;
+                string errorCode = statusCode == 429
+                    ? "RateLimited"
+                    : $"TelegramHttp{statusCode}";
+
+                string errorMessage = statusCode == 429 && retryAfterSeconds.HasValue
+                    ? $"Telegram API rate limit exceeded (HTTP 429); retry after {retryAfterSeconds.Value} seconds."
+                    : $"Telegram API returned HTTP {statusCode}.";
+
                 return new TelegramBotSendResult(
                     IsSuccess: false,
                     SentTelegramMessageId: null,
                     HttpStatusCode: statusCode,
-                    ErrorMessage: $"Telegram API returned HTTP {statusCode}.");
+                    ErrorMessage: errorMessage,
+                    IsTransientFailure: isTransient,
+                    RetryAfterSeconds: retryAfterSeconds,
+                    ErrorCode: errorCode);
             }
 
             long? sentMessageId = TryExtractMessageId(body);
@@ -145,7 +159,36 @@ public sealed class TelegramBotHttpClient : ITelegramBotClient
                 IsSuccess: true,
                 SentTelegramMessageId: sentMessageId,
                 HttpStatusCode: statusCode,
-                ErrorMessage: null);
+                ErrorMessage: null,
+                IsTransientFailure: false,
+                RetryAfterSeconds: null,
+                ErrorCode: null);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("Telegram Bot API request timed out.");
+
+            return new TelegramBotSendResult(
+                IsSuccess: false,
+                SentTelegramMessageId: null,
+                HttpStatusCode: null,
+                ErrorMessage: "Telegram Bot API request timed out.",
+                IsTransientFailure: true,
+                RetryAfterSeconds: null,
+                ErrorCode: "NetworkTimeout");
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning("Telegram Bot API request timed out.");
+
+            return new TelegramBotSendResult(
+                IsSuccess: false,
+                SentTelegramMessageId: null,
+                HttpStatusCode: null,
+                ErrorMessage: "Telegram Bot API request timed out.",
+                IsTransientFailure: true,
+                RetryAfterSeconds: null,
+                ErrorCode: "NetworkTimeout");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -160,7 +203,10 @@ public sealed class TelegramBotHttpClient : ITelegramBotClient
                 IsSuccess: false,
                 SentTelegramMessageId: null,
                 HttpStatusCode: null,
-                ErrorMessage: sanitizedError);
+                ErrorMessage: sanitizedError,
+                IsTransientFailure: true,
+                RetryAfterSeconds: null,
+                ErrorCode: "NetworkError");
         }
     }
 
@@ -182,6 +228,32 @@ public sealed class TelegramBotHttpClient : ITelegramBotClient
         }
     }
 
+    private static int? TryExtractRetryAfterSeconds(string responseBody, HttpResponseMessage response)
+    {
+        if (!string.IsNullOrWhiteSpace(responseBody))
+        {
+            try
+            {
+                var envelope = JsonSerializer.Deserialize<TelegramApiEnvelope>(responseBody);
+                if (envelope?.Parameters?.RetryAfter is > 0)
+                {
+                    return envelope.Parameters.RetryAfter.Value;
+                }
+            }
+            catch (JsonException)
+            {
+                // Ignore malformed body and fallback to Retry-After header
+            }
+        }
+
+        if (response.Headers.RetryAfter?.Delta is { TotalSeconds: > 0 } delta)
+        {
+            return (int)Math.Ceiling(delta.TotalSeconds);
+        }
+
+        return null;
+    }
+
     private sealed class TelegramApiEnvelope
     {
         [JsonPropertyName("ok")]
@@ -189,11 +261,20 @@ public sealed class TelegramBotHttpClient : ITelegramBotClient
 
         [JsonPropertyName("result")]
         public TelegramSentMessageResult? Result { get; set; }
+
+        [JsonPropertyName("parameters")]
+        public TelegramResponseParameters? Parameters { get; set; }
     }
 
     private sealed class TelegramSentMessageResult
     {
         [JsonPropertyName("message_id")]
         public long? MessageId { get; set; }
+    }
+
+    private sealed class TelegramResponseParameters
+    {
+        [JsonPropertyName("retry_after")]
+        public int? RetryAfter { get; set; }
     }
 }

@@ -25,6 +25,16 @@ public enum MessageProcessingStatus
     Processing = 12
 }
 
+public enum AcknowledgementDeliveryStatus
+{
+    NotApplicable = 0,
+    Pending = 1,
+    Sending = 2,
+    Delivered = 3,
+    FailedRetryable = 4,
+    FailedPermanent = 5
+}
+
 /// <summary>
 /// Represents an authorised Telegram group mapped to an operational activity as either
 /// a Source group (for branch submissions) or a Destination group (for summary reports).
@@ -74,7 +84,16 @@ public class TelegramMessageLog
 
     public MessageProcessingStatus ProcessingStatus { get; set; } = MessageProcessingStatus.Received;
     public string? RejectionReason { get; set; }
+
+    public AcknowledgementDeliveryStatus AcknowledgementStatus { get; set; } = AcknowledgementDeliveryStatus.NotApplicable;
+    public string? AcknowledgementMessageText { get; set; }
+    public int AcknowledgementAttemptCount { get; set; }
+    public DateTime? AcknowledgementSendingStartedAtUtc { get; set; }
+    public DateTime? AcknowledgementDeliveredAtUtc { get; set; }
+    public string? AcknowledgementLastError { get; set; }
+    public int? AcknowledgementRetryAfterSeconds { get; set; }
     public long? ReplyTelegramMessageId { get; set; }
+
     public byte[] RowVersion { get; set; } = Array.Empty<byte>();
 
     public bool IsTerminallyProcessed =>
@@ -88,6 +107,10 @@ public class TelegramMessageLog
             MessageProcessingStatus.RejectedInactiveBranch or
             MessageProcessingStatus.RejectedInvalidTransition;
 
+    public bool RequiresAcknowledgement =>
+        IsTerminallyProcessed &&
+        ProcessingStatus != MessageProcessingStatus.RejectedUnauthorisedGroup;
+
     public bool IsActivelyProcessing(DateTime utcNow, TimeSpan staleProcessingTimeout) =>
         ProcessingStatus == MessageProcessingStatus.Processing &&
         ProcessingStartedAtUtc.HasValue &&
@@ -97,6 +120,17 @@ public class TelegramMessageLog
         ProcessingStatus is MessageProcessingStatus.Received or MessageProcessingStatus.FailedError ||
         (ProcessingStatus == MessageProcessingStatus.Processing &&
          (!ProcessingStartedAtUtc.HasValue || utcNow - ProcessingStartedAtUtc.Value >= staleProcessingTimeout));
+
+    public bool IsAcknowledgementActivelySending(DateTime utcNow, TimeSpan staleSendingTimeout) =>
+        AcknowledgementStatus == AcknowledgementDeliveryStatus.Sending &&
+        AcknowledgementSendingStartedAtUtc.HasValue &&
+        utcNow - AcknowledgementSendingStartedAtUtc.Value < staleSendingTimeout;
+
+    public bool CanSendOrRecoverAcknowledgement(DateTime utcNow, TimeSpan staleSendingTimeout) =>
+        RequiresAcknowledgement &&
+        (AcknowledgementStatus is AcknowledgementDeliveryStatus.Pending or AcknowledgementDeliveryStatus.FailedRetryable ||
+         (AcknowledgementStatus == AcknowledgementDeliveryStatus.Sending &&
+          (!AcknowledgementSendingStartedAtUtc.HasValue || utcNow - AcknowledgementSendingStartedAtUtc.Value >= staleSendingTimeout)));
 
     public void MarkProcessing(DateTime startedAtUtc)
     {
@@ -114,7 +148,8 @@ public class TelegramMessageLog
         string? parsedActivityCode,
         string? parsedBranchCode,
         string? parsedStatusText,
-        string? rejectionReason)
+        string? rejectionReason,
+        string? acknowledgementMessageText = null)
     {
         ProcessingStatus = finalStatus;
         ProcessingStartedAtUtc = null;
@@ -126,6 +161,16 @@ public class TelegramMessageLog
         ParsedBranchCode = parsedBranchCode ?? ParsedBranchCode;
         ParsedStatusText = parsedStatusText ?? ParsedStatusText;
         RejectionReason = string.IsNullOrWhiteSpace(rejectionReason) ? null : rejectionReason.Trim();
+
+        if (!string.IsNullOrWhiteSpace(acknowledgementMessageText))
+        {
+            AcknowledgementMessageText = acknowledgementMessageText.Trim();
+        }
+
+        if (RequiresAcknowledgement && AcknowledgementStatus != AcknowledgementDeliveryStatus.Delivered)
+        {
+            AcknowledgementStatus = AcknowledgementDeliveryStatus.Pending;
+        }
     }
 
     public void MarkProcessingFailed(string sanitizedFailureReason)
@@ -136,5 +181,44 @@ public class TelegramMessageLog
         RejectionReason = string.IsNullOrWhiteSpace(sanitizedFailureReason)
             ? "Temporary processing error; eligible for retry recovery."
             : sanitizedFailureReason.Trim();
+    }
+
+    public void MarkAcknowledgementSending(DateTime startedAtUtc)
+    {
+        AcknowledgementStatus = AcknowledgementDeliveryStatus.Sending;
+        AcknowledgementSendingStartedAtUtc = startedAtUtc;
+        AcknowledgementAttemptCount++;
+        AcknowledgementLastError = null;
+        AcknowledgementRetryAfterSeconds = null;
+    }
+
+    public void MarkAcknowledgementDelivered(long? replyTelegramMessageId, DateTime deliveredAtUtc)
+    {
+        AcknowledgementStatus = AcknowledgementDeliveryStatus.Delivered;
+        ReplyTelegramMessageId = replyTelegramMessageId ?? ReplyTelegramMessageId;
+        AcknowledgementDeliveredAtUtc = deliveredAtUtc;
+        AcknowledgementSendingStartedAtUtc = null;
+        AcknowledgementLastError = null;
+        AcknowledgementRetryAfterSeconds = null;
+    }
+
+    public void MarkAcknowledgementFailedRetryable(string? sanitizedError, int? retryAfterSeconds = null)
+    {
+        AcknowledgementStatus = AcknowledgementDeliveryStatus.FailedRetryable;
+        AcknowledgementSendingStartedAtUtc = null;
+        AcknowledgementRetryAfterSeconds = retryAfterSeconds is > 0 ? retryAfterSeconds : null;
+        AcknowledgementLastError = string.IsNullOrWhiteSpace(sanitizedError)
+            ? "Temporary error while sending Telegram acknowledgement; eligible for retry."
+            : sanitizedError.Trim();
+    }
+
+    public void MarkAcknowledgementFailedPermanent(string? sanitizedError)
+    {
+        AcknowledgementStatus = AcknowledgementDeliveryStatus.FailedPermanent;
+        AcknowledgementSendingStartedAtUtc = null;
+        AcknowledgementRetryAfterSeconds = null;
+        AcknowledgementLastError = string.IsNullOrWhiteSpace(sanitizedError)
+            ? "Permanent error while sending Telegram acknowledgement."
+            : sanitizedError.Trim();
     }
 }

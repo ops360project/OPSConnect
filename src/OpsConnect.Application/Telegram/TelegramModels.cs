@@ -235,7 +235,8 @@ public enum TelegramUpdateHandlingOutcome
     FailedPersistence = 9,
     ProcessedSuccessfully = 10,
     RejectedActivitySubmission = 11,
-    ProcessingFailed = 12
+    ProcessingFailed = 12,
+    AcknowledgementDeliveryFailed = 13
 }
 
 public sealed record TelegramUpdateNormalizationResult(
@@ -289,7 +290,8 @@ public sealed record TelegramMessageIngestionResult(
     DateTime? ReceivedAtUtc,
     string? ErrorCode,
     string? ErrorMessage,
-    bool RequiresActivityProcessing = false);
+    bool RequiresActivityProcessing = false,
+    bool RequiresAcknowledgementDelivery = false);
 
 public sealed record TelegramMessageActivityProcessingResult(
     bool IsCompleted,
@@ -299,6 +301,20 @@ public sealed record TelegramMessageActivityProcessingResult(
     DateTime? ProcessedAtUtc,
     ActivityUpdateProcessingResult? ActivityResult,
     string? FailureReason);
+
+public sealed record TelegramAcknowledgementDeliveryResult(
+    bool IsDelivered,
+    bool WasAlreadyDeliveredOrInFlight,
+    bool IsRetryableFailure,
+    long TelegramMessageLogId,
+    AcknowledgementDeliveryStatus DeliveryStatus,
+    long? ReplyTelegramMessageId,
+    DateTime? DeliveredAtUtc,
+    int AttemptCount,
+    string? AcknowledgementText,
+    string? ErrorCode,
+    string? ErrorMessage,
+    int? RetryAfterSeconds = null);
 
 public sealed record TelegramWebhookHandlingResult(
     bool IsSuccess,
@@ -314,10 +330,109 @@ public sealed record TelegramWebhookHandlingResult(
     long? TelegramMessageLogId = null,
     MessageProcessingStatus? PersistedProcessingStatus = null,
     DateTime? ReceivedAtUtc = null,
-    ActivityUpdateProcessingResult? ActivityProcessingResult = null);
+    ActivityUpdateProcessingResult? ActivityProcessingResult = null,
+    AcknowledgementDeliveryStatus? AcknowledgementStatus = null,
+    long? ReplyTelegramMessageId = null,
+    TelegramAcknowledgementDeliveryResult? AcknowledgementDeliveryResult = null);
 
 public sealed record TelegramBotSendResult(
     bool IsSuccess,
     long? SentTelegramMessageId,
     int? HttpStatusCode,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    bool IsTransientFailure = false,
+    int? RetryAfterSeconds = null,
+    string? ErrorCode = null);
+
+/// <summary>
+/// Formats concise, group-safe Telegram submission acknowledgement replies without exposing
+/// SQL errors, stack traces, internal exception types, configuration secrets, or personal sender data.
+/// </summary>
+public static class TelegramAcknowledgementFormatter
+{
+    public const int MaxAcknowledgementLength = 500;
+
+    private static readonly string[] InternalErrorMarkers =
+    [
+        "SqlException",
+        "DbUpdateException",
+        "DbUpdateConcurrencyException",
+        "StackTrace",
+        "System.Data",
+        "Microsoft.Data.SqlClient",
+        "Microsoft.EntityFrameworkCore",
+        "   at "
+    ];
+
+    public static string FormatForResult(
+        ActivityUpdateProcessingResult? activityResult,
+        MessageProcessingStatus finalStatus,
+        TelegramBotOptions? options = null)
+    {
+        var candidate = activityResult?.ReplyMessage;
+        if (string.IsNullOrWhiteSpace(candidate) || ContainsInternalDiagnosticMarkers(candidate))
+        {
+            candidate = BuildFallbackMessage(activityResult, finalStatus);
+        }
+
+        var sanitized = TelegramSecretMasker.SanitizeForLogging(
+            candidate.Trim(),
+            options?.BotToken,
+            options?.WebhookSecretToken);
+
+        return sanitized.Length <= MaxAcknowledgementLength
+            ? sanitized
+            : sanitized[..MaxAcknowledgementLength];
+    }
+
+    public static bool ContainsInternalDiagnosticMarkers(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        foreach (var marker in InternalErrorMarkers)
+        {
+            if (text.Contains(marker, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string BuildFallbackMessage(
+        ActivityUpdateProcessingResult? result,
+        MessageProcessingStatus status)
+    {
+        var activityCode = string.IsNullOrWhiteSpace(result?.ActivityCode) ? "RFFO" : result.ActivityCode;
+        var branchLabel = string.IsNullOrWhiteSpace(result?.BranchCode) ? string.Empty : $" Branch {result.BranchCode}";
+        var dateLabel = result?.ReportingDate.HasValue == true
+            ? $" ({result.ReportingDate.Value:dd-MMM-yyyy})"
+            : string.Empty;
+
+        return status switch
+        {
+            MessageProcessingStatus.Accepted when result?.Outcome == OpsConnect.Domain.Activities.TransitionOutcome.AcceptedViaReopen =>
+                $"[{activityCode}]{branchLabel}{dateLabel}: Status reopened from {result.PreviousStatus} to {result.CurrentStatus}.",
+            MessageProcessingStatus.Accepted =>
+                $"[{activityCode}]{branchLabel}{dateLabel}: Status updated from {result?.PreviousStatus} to {result?.CurrentStatus}.",
+            MessageProcessingStatus.AcceptedUnchanged =>
+                $"[{activityCode}]{branchLabel}{dateLabel}: Status is already {result?.CurrentStatus} (no change).",
+            MessageProcessingStatus.RejectedInvalidFormat =>
+                "Update rejected (Invalid Format): Please submit Activity, Branch Code, and Status in the required 3-line format.",
+            MessageProcessingStatus.RejectedUnknownActivity =>
+                $"Update rejected: Activity '{activityCode}' is not supported or is currently inactive.",
+            MessageProcessingStatus.RejectedUnknownBranch =>
+                $"Update rejected:{branchLabel} is not registered in Organisation Master.",
+            MessageProcessingStatus.RejectedInactiveBranch =>
+                $"Update rejected:{branchLabel} is currently inactive or unmapped for the reporting date.",
+            MessageProcessingStatus.RejectedInvalidTransition =>
+                $"[{activityCode}]{branchLabel}{dateLabel}: Update rejected. Status transition is not permitted.",
+            _ =>
+                "Activity submission could not be processed."
+        };
+    }
+}

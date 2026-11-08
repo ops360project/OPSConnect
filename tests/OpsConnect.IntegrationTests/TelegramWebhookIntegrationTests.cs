@@ -1,3 +1,4 @@
+using System.Net;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
@@ -127,17 +128,20 @@ public class TelegramWebhookIntegrationTests
         byte[] bodyBytes,
         ClaimsPrincipal? user = null,
         IBusinessClock? clock = null,
-        ITelegramMessageIngestionService? customIngestionService = null)
+        ITelegramMessageIngestionService? customIngestionService = null,
+        ITelegramBotClient? customBotClient = null)
     {
         var optionsMonitor = new StaticOptionsMonitor<TelegramBotOptions>(options);
         var normalizer = new TelegramUpdateNormalizer();
         var groupAuthService = new TelegramGroupAuthorizationService(dbContext, optionsMonitor);
         var effectiveClock = clock ?? new SystemBusinessClock();
         var activityProcessor = CreateActivityUpdateProcessor(dbContext, effectiveClock);
+        var botClient = customBotClient ?? new RecordingFakeTelegramBotClient();
         var ingestionService = customIngestionService ?? new TelegramMessageIngestionService(
             dbContext,
             new TelegramActivityMessageParser(),
             activityProcessor,
+            botClient,
             effectiveClock,
             optionsMonitor,
             NullLogger<TelegramMessageIngestionService>.Instance);
@@ -888,6 +892,7 @@ public class TelegramWebhookIntegrationTests
                 context,
                 new TelegramActivityMessageParser(),
                 CreateActivityUpdateProcessor(context, fixedClock),
+                new RecordingFakeTelegramBotClient(),
                 fixedClock,
                 optionsMonitor,
                 NullLogger<TelegramMessageIngestionService>.Instance);
@@ -904,10 +909,15 @@ public class TelegramWebhookIntegrationTests
             Assert.True(processedRace.IsCompleted);
             Assert.Equal(MessageProcessingStatus.Accepted, processedRace.FinalProcessingStatus);
 
+            var deliveredRace = await ingestionService.DeliverAcknowledgementAsync(firstIngest.TelegramMessageLogId.Value);
+            Assert.True(deliveredRace.IsDelivered);
+            Assert.Equal(AcknowledgementDeliveryStatus.Delivered, deliveredRace.DeliveryStatus);
+
             var secondIngest = await ingestionService.IngestAuthorizedMessageAsync(raceEnvelope, groupAuth);
             Assert.True(secondIngest.IsPersistedOrDuplicate);
             Assert.True(secondIngest.IsDuplicate);
             Assert.False(secondIngest.RequiresActivityProcessing);
+            Assert.False(secondIngest.RequiresAcknowledgementDelivery);
             Assert.Equal(firstIngest.TelegramMessageLogId, secondIngest.TelegramMessageLogId);
 
             Assert.Equal(
@@ -1029,6 +1039,574 @@ public class TelegramWebhookIntegrationTests
                 ProcessedAtUtc: null,
                 ActivityResult: null,
                 FailureReason: "Temporary service error while processing Telegram update; please retry."));
+
+        public Task<TelegramAcknowledgementDeliveryResult> DeliverAcknowledgementAsync(
+            long telegramMessageLogId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new TelegramAcknowledgementDeliveryResult(
+                IsDelivered: false,
+                WasAlreadyDeliveredOrInFlight: false,
+                IsRetryableFailure: true,
+                TelegramMessageLogId: telegramMessageLogId,
+                DeliveryStatus: AcknowledgementDeliveryStatus.FailedRetryable,
+                ReplyTelegramMessageId: null,
+                DeliveredAtUtc: null,
+                AttemptCount: 1,
+                AcknowledgementText: null,
+                ErrorCode: "SimulatedFailure",
+                ErrorMessage: "Simulated ingestion failure; delivery not possible."));
+    }
+
+    [Fact]
+    public async Task WebhookAcknowledgements_ShouldDeliverReplies_HandleDuplicates_ApiFailures_Timeouts_RateLimits_AndNeverRepeatActivityProcessing()
+    {
+        var context = CreateContext();
+        await using var tx = await context.Database.BeginTransactionAsync();
+
+        var fixedClock = new FixedTestClock(
+            new DateTime(2026, 11, 8, 9, 30, 0, DateTimeKind.Utc),
+            new DateOnly(2026, 11, 8));
+
+        await SeedTestOrganisationHierarchyAsync(context, fixedClock, new DateOnly(2026, 11, 1));
+
+        var branch3601 = await context.Branches.SingleAsync(b => b.BranchCode == "36:01");
+        var branch3602 = await context.Branches.SingleAsync(b => b.BranchCode == "36:02");
+        var branch3603 = await context.Branches.SingleAsync(b => b.BranchCode == "36:03");
+
+        var botClient = new RecordingFakeTelegramBotClient();
+        var options = CreateDefaultOptions();
+
+        // 1. Accepted Pending submission -> reply sent to same group, reply_to_message_id set, delivered status recorded
+        var pendingBytes = SerializeUpdate(new
+        {
+            update_id = 300001,
+            message = new
+            {
+                message_id = 801,
+                date = 1762580000,
+                text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
+                from = new { id = 7001, is_bot = false, first_name = "Rajesh", username = "rajesh_ops" }
+            }
+        });
+
+        var pendingCtrl = CreateWebhookController(
+            context,
+            options,
+            secretHeaderValue: TestSecretToken,
+            bodyBytes: pendingBytes,
+            clock: fixedClock,
+            customBotClient: botClient);
+
+        var pendingResp = await pendingCtrl.ReceiveWebhook();
+        var pendingObj = Assert.IsType<ObjectResult>(pendingResp.Result);
+        Assert.Equal(StatusCodes.Status200OK, pendingObj.StatusCode);
+        var pendingResult = Assert.IsType<TelegramWebhookHandlingResult>(pendingObj.Value);
+
+        Assert.True(pendingResult.IsSuccess);
+        Assert.Equal(AcknowledgementDeliveryStatus.Delivered, pendingResult.AcknowledgementStatus);
+        Assert.NotNull(pendingResult.ReplyTelegramMessageId);
+
+        var sentPending = Assert.Single(botClient.SentMessages);
+        Assert.Equal(ConfiguredSourceChatId, sentPending.ChatId);
+        Assert.Equal(801, sentPending.ReplyToMessageId);
+        Assert.Contains("[RFFO]", sentPending.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Branch 36:01", sentPending.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Status updated from NotReported to Pending", sentPending.Text, StringComparison.OrdinalIgnoreCase);
+
+        var pendingLog = await context.TelegramMessageLogs.SingleAsync(m => m.TelegramUpdateId == 300001);
+        Assert.Equal(AcknowledgementDeliveryStatus.Delivered, pendingLog.AcknowledgementStatus);
+        Assert.Equal(sentPending.ReplyToMessageId, pendingLog.TelegramMessageId);
+        Assert.NotNull(pendingLog.ReplyTelegramMessageId);
+        Assert.NotNull(pendingLog.AcknowledgementDeliveredAtUtc);
+        Assert.Equal(sentPending.Text, pendingLog.AcknowledgementMessageText);
+
+        // 2. Accepted Completed submission -> reply sent acknowledging Completed status
+        var completedBytes = SerializeUpdate(new
+        {
+            update_id = 300002,
+            message = new
+            {
+                message_id = 802,
+                date = 1762580100,
+                text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Completed",
+                chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
+                from = new { id = 7001, is_bot = false, first_name = "Rajesh", username = "rajesh_ops" }
+            }
+        });
+
+        var completedCtrl = CreateWebhookController(
+            context,
+            options,
+            secretHeaderValue: TestSecretToken,
+            bodyBytes: completedBytes,
+            clock: fixedClock,
+            customBotClient: botClient);
+
+        var completedResp = await completedCtrl.ReceiveWebhook();
+        var completedObj = Assert.IsType<ObjectResult>(completedResp.Result);
+        Assert.Equal(StatusCodes.Status200OK, completedObj.StatusCode);
+        var completedResult = Assert.IsType<TelegramWebhookHandlingResult>(completedObj.Value);
+
+        Assert.True(completedResult.IsSuccess);
+        Assert.Equal(AcknowledgementDeliveryStatus.Delivered, completedResult.AcknowledgementStatus);
+        Assert.Equal(2, botClient.SentMessages.Count);
+        Assert.Equal(802, botClient.SentMessages[1].ReplyToMessageId);
+        Assert.Contains("Status updated from Pending to Completed", botClient.SentMessages[1].Text, StringComparison.OrdinalIgnoreCase);
+
+        // 3. Accepted Unchanged submission -> reply indicates status already recorded as Completed
+        var unchangedBytes = SerializeUpdate(new
+        {
+            update_id = 300003,
+            message = new
+            {
+                message_id = 803,
+                date = 1762580200,
+                text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Completed",
+                chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
+                from = new { id = 7001, is_bot = false, first_name = "Rajesh", username = "rajesh_ops" }
+            }
+        });
+
+        var unchangedCtrl = CreateWebhookController(
+            context,
+            options,
+            secretHeaderValue: TestSecretToken,
+            bodyBytes: unchangedBytes,
+            clock: fixedClock,
+            customBotClient: botClient);
+
+        var unchangedResp = await unchangedCtrl.ReceiveWebhook();
+        var unchangedObj = Assert.IsType<ObjectResult>(unchangedResp.Result);
+        Assert.Equal(StatusCodes.Status200OK, unchangedObj.StatusCode);
+        var unchangedResult = Assert.IsType<TelegramWebhookHandlingResult>(unchangedObj.Value);
+
+        Assert.True(unchangedResult.IsSuccess);
+        Assert.Equal(AcknowledgementDeliveryStatus.Delivered, unchangedResult.AcknowledgementStatus);
+        Assert.Equal(3, botClient.SentMessages.Count);
+        Assert.Equal(803, botClient.SentMessages[2].ReplyToMessageId);
+        Assert.Contains("Status is already Completed (no change)", botClient.SentMessages[2].Text, StringComparison.OrdinalIgnoreCase);
+
+        // 4. Business rejection responses
+        // 4a: Invalid message format
+        var invalidFormatBytes = SerializeUpdate(new
+        {
+            update_id = 300004,
+            message = new
+            {
+                message_id = 804,
+                date = 1762580300,
+                text = "Hello team please update RFFO soon",
+                chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
+                from = new { id = 7002, is_bot = false, first_name = "User2" }
+            }
+        });
+
+        var invalidFormatCtrl = CreateWebhookController(
+            context,
+            options,
+            secretHeaderValue: TestSecretToken,
+            bodyBytes: invalidFormatBytes,
+            clock: fixedClock,
+            customBotClient: botClient);
+
+        var formatResp = await invalidFormatCtrl.ReceiveWebhook();
+        var formatObj = Assert.IsType<ObjectResult>(formatResp.Result);
+        Assert.Equal(StatusCodes.Status200OK, formatObj.StatusCode);
+        Assert.Equal(4, botClient.SentMessages.Count);
+        Assert.Equal(804, botClient.SentMessages[3].ReplyToMessageId);
+        Assert.Contains("Invalid Format", botClient.SentMessages[3].Text, StringComparison.OrdinalIgnoreCase);
+
+        // 4b: Unsupported activity
+        var unsupportedActBytes = SerializeUpdate(new
+        {
+            update_id = 300005,
+            message = new
+            {
+                message_id = 805,
+                date = 1762580400,
+                text = "Activity : UNKNOWN_ACT\nBranch Code : 36:01\nStatus : Pending",
+                chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
+                from = new { id = 7002, is_bot = false, first_name = "User2" }
+            }
+        });
+
+        var unsupportedActCtrl = CreateWebhookController(
+            context,
+            options,
+            secretHeaderValue: TestSecretToken,
+            bodyBytes: unsupportedActBytes,
+            clock: fixedClock,
+            customBotClient: botClient);
+
+        var actResp = await unsupportedActCtrl.ReceiveWebhook();
+        var actObj = Assert.IsType<ObjectResult>(actResp.Result);
+        Assert.Equal(StatusCodes.Status200OK, actObj.StatusCode);
+        Assert.Equal(5, botClient.SentMessages.Count);
+        Assert.Equal(805, botClient.SentMessages[4].ReplyToMessageId);
+        Assert.Contains("UNKNOWN_ACT", botClient.SentMessages[4].Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not supported", botClient.SentMessages[4].Text, StringComparison.OrdinalIgnoreCase);
+
+        // 4c: Unknown branch
+        var unknownBranchBytes = SerializeUpdate(new
+        {
+            update_id = 300006,
+            message = new
+            {
+                message_id = 806,
+                date = 1762580500,
+                text = "Activity : RFFO\nBranch Code : 99:99\nStatus : Pending",
+                chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
+                from = new { id = 7002, is_bot = false, first_name = "User2" }
+            }
+        });
+
+        var unknownBranchCtrl = CreateWebhookController(
+            context,
+            options,
+            secretHeaderValue: TestSecretToken,
+            bodyBytes: unknownBranchBytes,
+            clock: fixedClock,
+            customBotClient: botClient);
+
+        var unknownBranchResp = await unknownBranchCtrl.ReceiveWebhook();
+        var unknownBranchObj = Assert.IsType<ObjectResult>(unknownBranchResp.Result);
+        Assert.Equal(StatusCodes.Status200OK, unknownBranchObj.StatusCode);
+        Assert.Equal(6, botClient.SentMessages.Count);
+        Assert.Equal(806, botClient.SentMessages[5].ReplyToMessageId);
+        Assert.Contains("99:99", botClient.SentMessages[5].Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not registered", botClient.SentMessages[5].Text, StringComparison.OrdinalIgnoreCase);
+
+        // 4d: Inactive branch (36:03)
+        var inactiveBranchBytes = SerializeUpdate(new
+        {
+            update_id = 300007,
+            message = new
+            {
+                message_id = 807,
+                date = 1762580600,
+                text = "Activity : RFFO\nBranch Code : 36:03\nStatus : Pending",
+                chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
+                from = new { id = 7002, is_bot = false, first_name = "User2" }
+            }
+        });
+
+        var inactiveBranchCtrl = CreateWebhookController(
+            context,
+            options,
+            secretHeaderValue: TestSecretToken,
+            bodyBytes: inactiveBranchBytes,
+            clock: fixedClock,
+            customBotClient: botClient);
+
+        var inactiveBranchResp = await inactiveBranchCtrl.ReceiveWebhook();
+        var inactiveBranchObj = Assert.IsType<ObjectResult>(inactiveBranchResp.Result);
+        Assert.Equal(StatusCodes.Status200OK, inactiveBranchObj.StatusCode);
+        Assert.Equal(7, botClient.SentMessages.Count);
+        Assert.Equal(807, botClient.SentMessages[6].ReplyToMessageId);
+        Assert.Contains("36:03", botClient.SentMessages[6].Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("inactive", botClient.SentMessages[6].Text, StringComparison.OrdinalIgnoreCase);
+
+        // 4e: Invalid transition (36:01 is currently Completed, transition to Pending without reopen permission rejected)
+        var invalidTransitionBytes = SerializeUpdate(new
+        {
+            update_id = 300008,
+            message = new
+            {
+                message_id = 808,
+                date = 1762580700,
+                text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
+                from = new { id = 7002, is_bot = false, first_name = "User2" }
+            }
+        });
+
+        var invalidTransitionCtrl = CreateWebhookController(
+            context,
+            options,
+            secretHeaderValue: TestSecretToken,
+            bodyBytes: invalidTransitionBytes,
+            clock: fixedClock,
+            customBotClient: botClient);
+
+        var transitionResp = await invalidTransitionCtrl.ReceiveWebhook();
+        var transitionObj = Assert.IsType<ObjectResult>(transitionResp.Result);
+        Assert.Equal(StatusCodes.Status200OK, transitionObj.StatusCode);
+        Assert.Equal(8, botClient.SentMessages.Count);
+        Assert.Equal(808, botClient.SentMessages[7].ReplyToMessageId);
+        Assert.Contains("36:01", botClient.SentMessages[7].Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("reopening permission", botClient.SentMessages[7].Text, StringComparison.OrdinalIgnoreCase);
+
+        // 5. Unauthorised source group -> NotApplicable and zero replies delivered
+        var countBeforeUnauth = botClient.SentMessages.Count;
+        var unauthBytes = SerializeUpdate(new
+        {
+            update_id = 300010,
+            message = new
+            {
+                message_id = 810,
+                date = 1762580800,
+                text = "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+                chat = new { id = UnauthorizedChatId, type = "supergroup", title = "Rogue Group" },
+                from = new { id = 9999, is_bot = false, first_name = "Attacker" }
+            }
+        });
+
+        var unauthCtrl = CreateWebhookController(
+            context,
+            options,
+            secretHeaderValue: TestSecretToken,
+            bodyBytes: unauthBytes,
+            clock: fixedClock,
+            customBotClient: botClient);
+
+        var unauthResp = await unauthCtrl.ReceiveWebhook();
+        var unauthObj = Assert.IsType<ObjectResult>(unauthResp.Result);
+        Assert.Equal(StatusCodes.Status403Forbidden, unauthObj.StatusCode);
+        var unauthResult = Assert.IsType<TelegramWebhookHandlingResult>(unauthObj.Value);
+
+        Assert.Equal(TelegramUpdateHandlingOutcome.RejectedUnauthorizedSourceGroup, unauthResult.Outcome);
+        Assert.Equal(AcknowledgementDeliveryStatus.NotApplicable, unauthResult.AcknowledgementStatus);
+        Assert.Equal(countBeforeUnauth, botClient.SentMessages.Count);
+
+        var unauthLog = await context.TelegramMessageLogs.SingleAsync(m => m.TelegramUpdateId == 300010);
+        Assert.Equal(AcknowledgementDeliveryStatus.NotApplicable, unauthLog.AcknowledgementStatus);
+        Assert.Null(unauthLog.ReplyTelegramMessageId);
+
+        // 6. Duplicate webhook delivery -> duplicate ignored, zero additional acknowledgements sent
+        var countBeforeDuplicate = botClient.SentMessages.Count;
+        var duplicatePendingCtrl = CreateWebhookController(
+            context,
+            options,
+            secretHeaderValue: TestSecretToken,
+            bodyBytes: pendingBytes,
+            clock: fixedClock,
+            customBotClient: botClient);
+
+        var duplicateResp = await duplicatePendingCtrl.ReceiveWebhook();
+        var duplicateObj = Assert.IsType<ObjectResult>(duplicateResp.Result);
+        Assert.Equal(StatusCodes.Status200OK, duplicateObj.StatusCode);
+        var duplicateResult = Assert.IsType<TelegramWebhookHandlingResult>(duplicateObj.Value);
+
+        Assert.Equal(TelegramUpdateHandlingOutcome.DuplicateIgnored, duplicateResult.Outcome);
+        Assert.Equal(countBeforeDuplicate, botClient.SentMessages.Count);
+
+        // 7. Outbound Telegram API failure recovery & no activity re-execution:
+        // Update 300011 for branch 36:02
+        var retryBranchBytes = SerializeUpdate(new
+        {
+            update_id = 300011,
+            message = new
+            {
+                message_id = 811,
+                date = 1762580900,
+                text = "Activity : RFFO\nBranch Code : 36:02\nStatus : Pending",
+                chat = new { id = ConfiguredSourceChatId, type = "supergroup", title = "Operations Group" },
+                from = new { id = 7001, is_bot = false, first_name = "Rajesh", username = "rajesh_ops" }
+            }
+        });
+
+        // First attempt: bot API fails transiently
+        botClient.SetSendHandler((chatId, text, replyTo) =>
+            Task.FromResult(new TelegramBotSendResult(
+                IsSuccess: false,
+                SentTelegramMessageId: null,
+                HttpStatusCode: 502,
+                ErrorMessage: "Telegram edge server returned 502 Bad Gateway",
+                IsTransientFailure: true,
+                RetryAfterSeconds: 0,
+                ErrorCode: "BadGateway")));
+
+        var failingCtrl = CreateWebhookController(
+            context,
+            options,
+            secretHeaderValue: TestSecretToken,
+            bodyBytes: retryBranchBytes,
+            clock: fixedClock,
+            customBotClient: botClient);
+
+        var failResp = await failingCtrl.ReceiveWebhook();
+        var failObj = Assert.IsType<ObjectResult>(failResp.Result);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, failObj.StatusCode);
+        var failResult = Assert.IsType<TelegramWebhookHandlingResult>(failObj.Value);
+        Assert.Equal(TelegramUpdateHandlingOutcome.AcknowledgementDeliveryFailed, failResult.Outcome);
+        Assert.Equal(AcknowledgementDeliveryStatus.FailedRetryable, failResult.AcknowledgementStatus);
+
+        // In DB: activity status is Accepted and recorded in ActivityHistory, but ack is FailedRetryable
+        var retryLog = await context.TelegramMessageLogs.SingleAsync(m => m.TelegramUpdateId == 300011);
+        Assert.Equal(MessageProcessingStatus.Accepted, retryLog.ProcessingStatus);
+        Assert.Equal(AcknowledgementDeliveryStatus.FailedRetryable, retryLog.AcknowledgementStatus);
+        Assert.Null(retryLog.ReplyTelegramMessageId);
+
+        var branch3602HistoryCount = await context.ActivityHistories
+            .CountAsync(h => h.BranchId == branch3602.BranchId && h.ReportingDate == new DateOnly(2026, 11, 8));
+        Assert.Equal(1, branch3602HistoryCount);
+
+        // Second attempt: bot API recovered
+        botClient.SetSendHandler(null);
+
+        var recoverCtrl = CreateWebhookController(
+            context,
+            options,
+            secretHeaderValue: TestSecretToken,
+            bodyBytes: retryBranchBytes,
+            clock: fixedClock,
+            customBotClient: botClient);
+
+        var recoverResp = await recoverCtrl.ReceiveWebhook();
+        var recoverObj = Assert.IsType<ObjectResult>(recoverResp.Result);
+        Assert.Equal(StatusCodes.Status200OK, recoverObj.StatusCode);
+        var recoverResult = Assert.IsType<TelegramWebhookHandlingResult>(recoverObj.Value);
+
+        Assert.True(recoverResult.IsSuccess);
+        Assert.Equal(AcknowledgementDeliveryStatus.Delivered, recoverResult.AcknowledgementStatus);
+        Assert.NotNull(recoverResult.ReplyTelegramMessageId);
+
+        // Verify in DB that acknowledgement is delivered
+        await context.Entry(retryLog).ReloadAsync();
+        Assert.Equal(AcknowledgementDeliveryStatus.Delivered, retryLog.AcknowledgementStatus);
+        Assert.NotNull(retryLog.ReplyTelegramMessageId);
+        Assert.NotNull(retryLog.AcknowledgementDeliveredAtUtc);
+
+        // CRITICAL CHECK: Activity history count for branch 36:02 is STILL exactly 1!
+        // The activity handler was NOT re-executed during the acknowledgement delivery retry!
+        var branch3602HistoryCountAfterRecovery = await context.ActivityHistories
+            .CountAsync(h => h.BranchId == branch3602.BranchId && h.ReportingDate == new DateOnly(2026, 11, 8));
+        Assert.Equal(1, branch3602HistoryCountAfterRecovery);
+
+        // 8. Outbound Telegram Bot API Network timeout and HTTP 429 rate limit via TelegramBotHttpClient
+        // 8a: HTTP 429 with retry_after
+        var rateLimitHandler = new ScriptedTelegramHttpMessageHandler(
+            statusCode: (HttpStatusCode)429,
+            content: "{\"ok\":false,\"error_code\":429,\"description\":\"Too Many Requests: retry after 18\",\"parameters\":{\"retry_after\":18}}");
+        using var rateLimitHttp = new HttpClient(rateLimitHandler);
+        var rateLimitBotClient = new TelegramBotHttpClient(
+            rateLimitHttp,
+            new StaticOptionsMonitor<TelegramBotOptions>(options),
+            NullLogger<TelegramBotHttpClient>.Instance);
+
+        var rateLimitResult = await rateLimitBotClient.SendMessageAsync(ConfiguredSourceChatId, "Test message");
+        Assert.False(rateLimitResult.IsSuccess);
+        Assert.True(rateLimitResult.IsTransientFailure);
+        Assert.Equal(18, rateLimitResult.RetryAfterSeconds);
+        Assert.Equal("RateLimited", rateLimitResult.ErrorCode);
+
+        // 8b: Network timeout
+        var timeoutHandler = new ScriptedTelegramHttpMessageHandler(
+            exceptionToThrow: new TimeoutException("The request timed out while communicating with Telegram."));
+        using var timeoutHttp = new HttpClient(timeoutHandler);
+        var timeoutBotClient = new TelegramBotHttpClient(
+            timeoutHttp,
+            new StaticOptionsMonitor<TelegramBotOptions>(options),
+            NullLogger<TelegramBotHttpClient>.Instance);
+
+        var timeoutResult = await timeoutBotClient.SendMessageAsync(ConfiguredSourceChatId, "Test message");
+        Assert.False(timeoutResult.IsSuccess);
+        Assert.True(timeoutResult.IsTransientFailure);
+        Assert.Equal("NetworkTimeout", timeoutResult.ErrorCode);
+    }
+
+    public sealed class SentTelegramMessageRecord
+    {
+        public long ChatId { get; init; }
+        public string Text { get; init; } = string.Empty;
+        public long? ReplyToMessageId { get; init; }
+        public DateTime SentAtUtc { get; init; }
+    }
+
+    public sealed class RecordingFakeTelegramBotClient : ITelegramBotClient
+    {
+        private readonly List<SentTelegramMessageRecord> _sentMessages = new();
+        private Func<long, string, long?, Task<TelegramBotSendResult>>? _sendHandler;
+        private long _nextTelegramMessageId = 90000;
+
+        public IReadOnlyList<SentTelegramMessageRecord> SentMessages
+        {
+            get
+            {
+                lock (_sentMessages)
+                {
+                    return _sentMessages.ToList();
+                }
+            }
+        }
+
+        public void SetSendHandler(Func<long, string, long?, Task<TelegramBotSendResult>>? handler)
+        {
+            _sendHandler = handler;
+        }
+
+        public async Task<TelegramBotSendResult> SendMessageAsync(
+            long chatId,
+            string text,
+            long? replyToMessageId = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (_sendHandler is not null)
+            {
+                return await _sendHandler(chatId, text, replyToMessageId);
+            }
+
+            var record = new SentTelegramMessageRecord
+            {
+                ChatId = chatId,
+                Text = text,
+                ReplyToMessageId = replyToMessageId,
+                SentAtUtc = DateTime.UtcNow
+            };
+
+            lock (_sentMessages)
+            {
+                _sentMessages.Add(record);
+            }
+
+            var assignedId = Interlocked.Increment(ref _nextTelegramMessageId);
+            return new TelegramBotSendResult(true, assignedId, 200, null);
+        }
+
+        public Task<TelegramBotSendResult> SetWebhookAsync(
+            string webhookUrl,
+            string secretToken,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new TelegramBotSendResult(true, null, 200, null));
+
+        public Task<TelegramBotSendResult> DeleteWebhookAsync(
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new TelegramBotSendResult(true, null, 200, null));
+    }
+
+    private sealed class ScriptedTelegramHttpMessageHandler : HttpMessageHandler
+    {
+        private readonly HttpStatusCode _statusCode;
+        private readonly string _content;
+        private readonly Exception? _exceptionToThrow;
+
+        public ScriptedTelegramHttpMessageHandler(
+            HttpStatusCode statusCode = HttpStatusCode.OK,
+            string content = "{\"ok\":true,\"result\":{\"message_id\":9999}}",
+            Exception? exceptionToThrow = null)
+        {
+            _statusCode = statusCode;
+            _content = content;
+            _exceptionToThrow = exceptionToThrow;
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            if (_exceptionToThrow is not null)
+            {
+                throw _exceptionToThrow;
+            }
+
+            var response = new HttpResponseMessage(_statusCode)
+            {
+                Content = new StringContent(_content, Encoding.UTF8, "application/json")
+            };
+
+            return Task.FromResult(response);
+        }
     }
 
     private sealed class FixedTestClock : IBusinessClock

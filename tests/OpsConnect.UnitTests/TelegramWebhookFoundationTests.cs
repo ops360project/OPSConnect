@@ -1,4 +1,6 @@
+using OpsConnect.Application.Activities.Common;
 using OpsConnect.Application.Telegram;
+using OpsConnect.Domain.Activities;
 using OpsConnect.Domain.Telegram;
 
 namespace OpsConnect.UnitTests;
@@ -318,5 +320,116 @@ public class TelegramWebhookFoundationTests
         Assert.Equal(t0.AddSeconds(66), log.ProcessedAtUtc);
         Assert.True(log.IsTerminallyProcessed);
         Assert.False(log.CanStartOrRecoverProcessing(t0.AddMinutes(10), timeout));
+    }
+
+    [Fact]
+    public void TelegramMessageLog_AcknowledgementLifecycle_ShouldTrackPendingSendingRetryablePermanentAndDeliveredStates()
+    {
+        var t0 = new DateTime(2026, 11, 8, 9, 0, 0, DateTimeKind.Utc);
+        var timeout = TimeSpan.FromSeconds(60);
+
+        // 1. Unauthorised group message must never require acknowledgement
+        var unauthLog = new TelegramMessageLog
+        {
+            TelegramUpdateId = 60001,
+            TelegramChatId = -100999,
+            TelegramMessageId = 1,
+            ProcessingStatus = MessageProcessingStatus.RejectedUnauthorisedGroup
+        };
+        Assert.False(unauthLog.RequiresAcknowledgement);
+        Assert.False(unauthLog.CanSendOrRecoverAcknowledgement(t0, timeout));
+
+        // 2. Authorised message completed -> AcknowledgementStatus transitions to Pending
+        var log = new TelegramMessageLog
+        {
+            TelegramUpdateId = 60002,
+            TelegramChatId = -100123,
+            TelegramMessageId = 20,
+            ProcessingStatus = MessageProcessingStatus.Processing
+        };
+        log.MarkCompleted(
+            finalStatus: MessageProcessingStatus.Accepted,
+            processedAtUtc: t0,
+            activityId: 1,
+            branchId: 10,
+            reportingDate: new DateOnly(2026, 11, 8),
+            parsedActivityCode: "RFFO",
+            parsedBranchCode: "36:01",
+            parsedStatusText: "Pending",
+            rejectionReason: null,
+            acknowledgementMessageText: "[RFFO] Branch 36:01 (08-Nov-2026): Status updated from NotReported to Pending.");
+
+        Assert.True(log.RequiresAcknowledgement);
+        Assert.Equal(AcknowledgementDeliveryStatus.Pending, log.AcknowledgementStatus);
+        Assert.True(log.CanSendOrRecoverAcknowledgement(t0, timeout));
+
+        // 3. MarkAcknowledgementSending increments AttemptCount and blocks concurrent sending within lease window
+        log.MarkAcknowledgementSending(t0.AddSeconds(1));
+        Assert.Equal(AcknowledgementDeliveryStatus.Sending, log.AcknowledgementStatus);
+        Assert.Equal(1, log.AcknowledgementAttemptCount);
+        Assert.True(log.IsAcknowledgementActivelySending(t0.AddSeconds(10), timeout));
+        Assert.False(log.CanSendOrRecoverAcknowledgement(t0.AddSeconds(10), timeout));
+
+        // 4. Stale Sending (after timeout) becomes recoverable
+        Assert.False(log.IsAcknowledgementActivelySending(t0.AddSeconds(65), timeout));
+        Assert.True(log.CanSendOrRecoverAcknowledgement(t0.AddSeconds(65), timeout));
+
+        // 5. MarkAcknowledgementFailedRetryable records retry-after and remains recoverable
+        log.MarkAcknowledgementFailedRetryable("Telegram API rate limit exceeded (HTTP 429); retry after 15 seconds.", retryAfterSeconds: 15);
+        Assert.Equal(AcknowledgementDeliveryStatus.FailedRetryable, log.AcknowledgementStatus);
+        Assert.Equal(15, log.AcknowledgementRetryAfterSeconds);
+        Assert.True(log.CanSendOrRecoverAcknowledgement(t0.AddSeconds(66), timeout));
+
+        // 6. MarkAcknowledgementDelivered records ReplyTelegramMessageId and is never resent
+        log.MarkAcknowledgementSending(t0.AddSeconds(70));
+        Assert.Equal(2, log.AcknowledgementAttemptCount);
+        log.MarkAcknowledgementDelivered(replyTelegramMessageId: 9012, deliveredAtUtc: t0.AddSeconds(71));
+
+        Assert.Equal(AcknowledgementDeliveryStatus.Delivered, log.AcknowledgementStatus);
+        Assert.Equal(9012, log.ReplyTelegramMessageId);
+        Assert.Equal(t0.AddSeconds(71), log.AcknowledgementDeliveredAtUtc);
+        Assert.Null(log.AcknowledgementLastError);
+        Assert.Null(log.AcknowledgementRetryAfterSeconds);
+        Assert.False(log.CanSendOrRecoverAcknowledgement(t0.AddMinutes(30), timeout));
+    }
+
+    [Fact]
+    public void TelegramAcknowledgementFormatter_ShouldFormatCleanGroupMessagesAndNeverExposeInternalExceptionsOrSecrets()
+    {
+        var options = new TelegramBotOptions
+        {
+            BotToken = ValidBotToken,
+            WebhookSecretToken = ValidSecret
+        };
+
+        var unsafeResult = new ActivityUpdateProcessingResult(
+            IsAccepted: false,
+            ProcessingStatus: MessageProcessingStatus.RejectedUnknownBranch,
+            Outcome: TransitionOutcome.Rejected,
+            ActivityCode: "RFFO",
+            ActivityId: 1,
+            BranchCode: "99:99",
+            BranchId: null,
+            ReportingDate: new DateOnly(2026, 11, 8),
+            PreviousStatus: null,
+            CurrentStatus: null,
+            DidStatusChange: false,
+            DidConsumeReopenPermission: false,
+            ConsumedPermissionId: null,
+            DidReactivateReportingCycle: false,
+            DidTriggerImmediateFinalReportCondition: false,
+            RejectionReason: "SqlException at Microsoft.Data.SqlClient",
+            ReplyMessage: $"SqlException thrown with token {ValidBotToken} and secret {ValidSecret}\n   at System.Data.SqlClient");
+
+        var formatted = TelegramAcknowledgementFormatter.FormatForResult(
+            unsafeResult,
+            MessageProcessingStatus.RejectedUnknownBranch,
+            options);
+
+        Assert.DoesNotContain("SqlException", formatted, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Microsoft.Data.SqlClient", formatted, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(ValidBotToken, formatted, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(ValidSecret, formatted, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("99:99", formatted, StringComparison.OrdinalIgnoreCase);
     }
 }

@@ -23,6 +23,8 @@ public sealed class TelegramMessageIngestionService : ITelegramMessageIngestionS
     private const string IngestSavepointName = "TelegramIngestSavepoint";
     private const string ClaimSavepointName = "TelegramClaimSavepoint";
     private const string CompleteSavepointName = "TelegramCompleteSavepoint";
+    private const string AckClaimSavepointName = "TelegramAckClaimSavepoint";
+    private const string AckCompleteSavepointName = "TelegramAckDoneSavepoint";
     private const int SqlDuplicateKeyRowError = 2601;
     private const int SqlUniqueConstraintError = 2627;
 
@@ -31,6 +33,7 @@ public sealed class TelegramMessageIngestionService : ITelegramMessageIngestionS
     private readonly OpsConnectDbContext _dbContext;
     private readonly ITelegramActivityMessageParser _messageParser;
     private readonly IActivityUpdateProcessor _activityUpdateProcessor;
+    private readonly ITelegramBotClient _telegramBotClient;
     private readonly IBusinessClock _businessClock;
     private readonly IOptionsMonitor<TelegramBotOptions> _optionsMonitor;
     private readonly ILogger<TelegramMessageIngestionService> _logger;
@@ -40,6 +43,7 @@ public sealed class TelegramMessageIngestionService : ITelegramMessageIngestionS
         OpsConnectDbContext dbContext,
         ITelegramActivityMessageParser messageParser,
         IActivityUpdateProcessor activityUpdateProcessor,
+        ITelegramBotClient telegramBotClient,
         IBusinessClock businessClock,
         IOptionsMonitor<TelegramBotOptions> optionsMonitor,
         ILogger<TelegramMessageIngestionService> logger,
@@ -48,6 +52,7 @@ public sealed class TelegramMessageIngestionService : ITelegramMessageIngestionS
         ArgumentNullException.ThrowIfNull(dbContext);
         ArgumentNullException.ThrowIfNull(messageParser);
         ArgumentNullException.ThrowIfNull(activityUpdateProcessor);
+        ArgumentNullException.ThrowIfNull(telegramBotClient);
         ArgumentNullException.ThrowIfNull(businessClock);
         ArgumentNullException.ThrowIfNull(optionsMonitor);
         ArgumentNullException.ThrowIfNull(logger);
@@ -55,6 +60,7 @@ public sealed class TelegramMessageIngestionService : ITelegramMessageIngestionS
         _dbContext = dbContext;
         _messageParser = messageParser;
         _activityUpdateProcessor = activityUpdateProcessor;
+        _telegramBotClient = telegramBotClient;
         _businessClock = businessClock;
         _optionsMonitor = optionsMonitor;
         _logger = logger;
@@ -151,6 +157,11 @@ public sealed class TelegramMessageIngestionService : ITelegramMessageIngestionS
                     _ => MessageProcessingStatus.RejectedInvalidTransition
                 };
 
+                var reconciledAck = TelegramAcknowledgementFormatter.FormatForResult(
+                    activityResult: null,
+                    finalStatus: reconciledStatus,
+                    options: _optionsMonitor.CurrentValue);
+
                 log.MarkCompleted(
                     finalStatus: reconciledStatus,
                     processedAtUtc: existingHistory.RecordedAtUtc,
@@ -162,7 +173,8 @@ public sealed class TelegramMessageIngestionService : ITelegramMessageIngestionS
                     parsedStatusText: existingHistory.NewStatus.ToString(),
                     rejectionReason: reconciledStatus == MessageProcessingStatus.RejectedInvalidTransition
                         ? existingHistory.Notes
-                        : null);
+                        : null,
+                    acknowledgementMessageText: Truncate(reconciledAck, 1000));
 
                 await SaveChangesInSavepointOrTransactionAsync(CompleteSavepointName, cancellationToken);
 
@@ -240,9 +252,13 @@ public sealed class TelegramMessageIngestionService : ITelegramMessageIngestionS
                     FailureReason: null);
             }
 
-            // 6. Persist the final processing outcome on the original TelegramMessageLog record
+            // 6. Persist the final processing outcome and prepared acknowledgement text on the original TelegramMessageLog record
             var processedAtUtc = _businessClock.UtcNow;
             var statusText = (activityResult.CurrentStatus ?? activityResult.PreviousStatus)?.ToString() ?? log.ParsedStatusText;
+            var ackText = TelegramAcknowledgementFormatter.FormatForResult(
+                activityResult,
+                activityResult.ProcessingStatus,
+                _optionsMonitor.CurrentValue);
 
             log.MarkCompleted(
                 finalStatus: activityResult.ProcessingStatus,
@@ -253,7 +269,8 @@ public sealed class TelegramMessageIngestionService : ITelegramMessageIngestionS
                 parsedActivityCode: Truncate(activityResult.ActivityCode, 50),
                 parsedBranchCode: Truncate(activityResult.BranchCode, 50),
                 parsedStatusText: Truncate(statusText, 50),
-                rejectionReason: Truncate(activityResult.RejectionReason, 1000));
+                rejectionReason: Truncate(activityResult.RejectionReason, 1000),
+                acknowledgementMessageText: Truncate(ackText, 1000));
 
             await SaveChangesInSavepointOrTransactionAsync(CompleteSavepointName, cancellationToken);
 
@@ -292,6 +309,234 @@ public sealed class TelegramMessageIngestionService : ITelegramMessageIngestionS
         }
     }
 
+    public async Task<TelegramAcknowledgementDeliveryResult> DeliverAcknowledgementAsync(
+        long telegramMessageLogId,
+        CancellationToken cancellationToken = default)
+    {
+        var nowUtc = _businessClock.UtcNow;
+
+        try
+        {
+            var log = await _dbContext.TelegramMessageLogs
+                .SingleOrDefaultAsync(x => x.TelegramMessageLogId == telegramMessageLogId, cancellationToken);
+
+            if (log is null)
+            {
+                return new TelegramAcknowledgementDeliveryResult(
+                    IsDelivered: false,
+                    WasAlreadyDeliveredOrInFlight: false,
+                    IsRetryableFailure: false,
+                    TelegramMessageLogId: telegramMessageLogId,
+                    DeliveryStatus: AcknowledgementDeliveryStatus.NotApplicable,
+                    ReplyTelegramMessageId: null,
+                    DeliveredAtUtc: null,
+                    AttemptCount: 0,
+                    AcknowledgementText: null,
+                    ErrorCode: "MessageLogNotFound",
+                    ErrorMessage: "Telegram message log record was not found.");
+            }
+
+            // Never send acknowledgements to unauthorised groups or non-terminal processing states
+            if (!log.RequiresAcknowledgement)
+            {
+                return new TelegramAcknowledgementDeliveryResult(
+                    IsDelivered: false,
+                    WasAlreadyDeliveredOrInFlight: false,
+                    IsRetryableFailure: false,
+                    TelegramMessageLogId: log.TelegramMessageLogId,
+                    DeliveryStatus: AcknowledgementDeliveryStatus.NotApplicable,
+                    ReplyTelegramMessageId: null,
+                    DeliveredAtUtc: null,
+                    AttemptCount: log.AcknowledgementAttemptCount,
+                    AcknowledgementText: null,
+                    ErrorCode: null,
+                    ErrorMessage: null);
+            }
+
+            // Already delivered -> idempotent return without calling Telegram API again
+            if (log.AcknowledgementStatus == AcknowledgementDeliveryStatus.Delivered)
+            {
+                return new TelegramAcknowledgementDeliveryResult(
+                    IsDelivered: true,
+                    WasAlreadyDeliveredOrInFlight: true,
+                    IsRetryableFailure: false,
+                    TelegramMessageLogId: log.TelegramMessageLogId,
+                    DeliveryStatus: AcknowledgementDeliveryStatus.Delivered,
+                    ReplyTelegramMessageId: log.ReplyTelegramMessageId,
+                    DeliveredAtUtc: log.AcknowledgementDeliveredAtUtc,
+                    AttemptCount: log.AcknowledgementAttemptCount,
+                    AcknowledgementText: log.AcknowledgementMessageText,
+                    ErrorCode: null,
+                    ErrorMessage: null);
+            }
+
+            // Permanent Telegram error (e.g. bot kicked/blocked from group) -> do not retry endlessly
+            if (log.AcknowledgementStatus == AcknowledgementDeliveryStatus.FailedPermanent)
+            {
+                return new TelegramAcknowledgementDeliveryResult(
+                    IsDelivered: false,
+                    WasAlreadyDeliveredOrInFlight: false,
+                    IsRetryableFailure: false,
+                    TelegramMessageLogId: log.TelegramMessageLogId,
+                    DeliveryStatus: AcknowledgementDeliveryStatus.FailedPermanent,
+                    ReplyTelegramMessageId: null,
+                    DeliveredAtUtc: null,
+                    AttemptCount: log.AcknowledgementAttemptCount,
+                    AcknowledgementText: log.AcknowledgementMessageText,
+                    ErrorCode: "PermanentTelegramDeliveryFailure",
+                    ErrorMessage: log.AcknowledgementLastError);
+            }
+
+            // Another concurrent worker is actively sending this acknowledgement
+            if (log.IsAcknowledgementActivelySending(nowUtc, _staleProcessingTimeout))
+            {
+                return new TelegramAcknowledgementDeliveryResult(
+                    IsDelivered: false,
+                    WasAlreadyDeliveredOrInFlight: true,
+                    IsRetryableFailure: false,
+                    TelegramMessageLogId: log.TelegramMessageLogId,
+                    DeliveryStatus: AcknowledgementDeliveryStatus.Sending,
+                    ReplyTelegramMessageId: log.ReplyTelegramMessageId,
+                    DeliveredAtUtc: log.AcknowledgementDeliveredAtUtc,
+                    AttemptCount: log.AcknowledgementAttemptCount,
+                    AcknowledgementText: log.AcknowledgementMessageText,
+                    ErrorCode: null,
+                    ErrorMessage: null);
+            }
+
+            // Ensure acknowledgement text is prepared
+            if (string.IsNullOrWhiteSpace(log.AcknowledgementMessageText))
+            {
+                log.AcknowledgementMessageText = Truncate(
+                    TelegramAcknowledgementFormatter.FormatForResult(
+                        activityResult: null,
+                        finalStatus: log.ProcessingStatus,
+                        options: _optionsMonitor.CurrentValue),
+                    1000);
+            }
+
+            // Claim the acknowledgement for sending using RowVersion optimistic concurrency
+            bool claimed = await TryClaimAcknowledgementForSendingAsync(log, nowUtc, cancellationToken);
+            if (!claimed)
+            {
+                var reloaded = await _dbContext.TelegramMessageLogs
+                    .AsNoTracking()
+                    .SingleOrDefaultAsync(x => x.TelegramMessageLogId == telegramMessageLogId, cancellationToken);
+
+                return new TelegramAcknowledgementDeliveryResult(
+                    IsDelivered: reloaded?.AcknowledgementStatus == AcknowledgementDeliveryStatus.Delivered,
+                    WasAlreadyDeliveredOrInFlight: true,
+                    IsRetryableFailure: false,
+                    TelegramMessageLogId: telegramMessageLogId,
+                    DeliveryStatus: reloaded?.AcknowledgementStatus ?? AcknowledgementDeliveryStatus.Sending,
+                    ReplyTelegramMessageId: reloaded?.ReplyTelegramMessageId,
+                    DeliveredAtUtc: reloaded?.AcknowledgementDeliveredAtUtc,
+                    AttemptCount: reloaded?.AcknowledgementAttemptCount ?? log.AcknowledgementAttemptCount,
+                    AcknowledgementText: reloaded?.AcknowledgementMessageText ?? log.AcknowledgementMessageText,
+                    ErrorCode: null,
+                    ErrorMessage: null);
+            }
+
+            // Send the reply to the same source Telegram group, replying to the original message ID
+            var sendResult = await _telegramBotClient.SendMessageAsync(
+                chatId: log.TelegramChatId,
+                text: log.AcknowledgementMessageText!,
+                replyToMessageId: log.TelegramMessageId,
+                cancellationToken: cancellationToken);
+
+            if (sendResult.IsSuccess)
+            {
+                var deliveredAtUtc = _businessClock.UtcNow;
+                log.MarkAcknowledgementDelivered(sendResult.SentTelegramMessageId, deliveredAtUtc);
+                await SaveChangesInSavepointOrTransactionAsync(AckCompleteSavepointName, cancellationToken);
+
+                return new TelegramAcknowledgementDeliveryResult(
+                    IsDelivered: true,
+                    WasAlreadyDeliveredOrInFlight: false,
+                    IsRetryableFailure: false,
+                    TelegramMessageLogId: log.TelegramMessageLogId,
+                    DeliveryStatus: AcknowledgementDeliveryStatus.Delivered,
+                    ReplyTelegramMessageId: log.ReplyTelegramMessageId,
+                    DeliveredAtUtc: log.AcknowledgementDeliveredAtUtc,
+                    AttemptCount: log.AcknowledgementAttemptCount,
+                    AcknowledgementText: log.AcknowledgementMessageText,
+                    ErrorCode: null,
+                    ErrorMessage: null);
+            }
+
+            var sanitizedError = Truncate(
+                TelegramSecretMasker.SanitizeForLogging(
+                    sendResult.ErrorMessage ?? "Telegram API delivery failed.",
+                    _optionsMonitor.CurrentValue.BotToken,
+                    _optionsMonitor.CurrentValue.WebhookSecretToken),
+                500);
+
+            if (sendResult.IsTransientFailure)
+            {
+                log.MarkAcknowledgementFailedRetryable(sanitizedError, sendResult.RetryAfterSeconds);
+                await SaveChangesInSavepointOrTransactionAsync(AckCompleteSavepointName, cancellationToken);
+
+                return new TelegramAcknowledgementDeliveryResult(
+                    IsDelivered: false,
+                    WasAlreadyDeliveredOrInFlight: false,
+                    IsRetryableFailure: true,
+                    TelegramMessageLogId: log.TelegramMessageLogId,
+                    DeliveryStatus: AcknowledgementDeliveryStatus.FailedRetryable,
+                    ReplyTelegramMessageId: null,
+                    DeliveredAtUtc: null,
+                    AttemptCount: log.AcknowledgementAttemptCount,
+                    AcknowledgementText: log.AcknowledgementMessageText,
+                    ErrorCode: sendResult.ErrorCode ?? "TelegramDeliveryRetryableFailure",
+                    ErrorMessage: sanitizedError,
+                    RetryAfterSeconds: sendResult.RetryAfterSeconds);
+            }
+
+            log.MarkAcknowledgementFailedPermanent(sanitizedError);
+            await SaveChangesInSavepointOrTransactionAsync(AckCompleteSavepointName, cancellationToken);
+
+            return new TelegramAcknowledgementDeliveryResult(
+                IsDelivered: false,
+                WasAlreadyDeliveredOrInFlight: false,
+                IsRetryableFailure: false,
+                TelegramMessageLogId: log.TelegramMessageLogId,
+                DeliveryStatus: AcknowledgementDeliveryStatus.FailedPermanent,
+                ReplyTelegramMessageId: null,
+                DeliveredAtUtc: null,
+                AttemptCount: log.AcknowledgementAttemptCount,
+                AcknowledgementText: log.AcknowledgementMessageText,
+                ErrorCode: sendResult.ErrorCode ?? "TelegramDeliveryPermanentFailure",
+                ErrorMessage: sanitizedError);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            var options = _optionsMonitor.CurrentValue;
+            var sanitized = TelegramSecretMasker.SanitizeForLogging(
+                ex.Message,
+                options.BotToken,
+                options.WebhookSecretToken);
+
+            _logger.LogError(
+                "Unexpected error while delivering Telegram acknowledgement (TelegramMessageLogId={LogId}): {SanitizedError}",
+                telegramMessageLogId,
+                sanitized);
+
+            await TryMarkAcknowledgementFailedRetryableAsync(telegramMessageLogId, sanitized, cancellationToken);
+
+            return new TelegramAcknowledgementDeliveryResult(
+                IsDelivered: false,
+                WasAlreadyDeliveredOrInFlight: false,
+                IsRetryableFailure: true,
+                TelegramMessageLogId: telegramMessageLogId,
+                DeliveryStatus: AcknowledgementDeliveryStatus.FailedRetryable,
+                ReplyTelegramMessageId: null,
+                DeliveredAtUtc: null,
+                AttemptCount: 1,
+                AcknowledgementText: null,
+                ErrorCode: "TelegramAcknowledgementException",
+                ErrorMessage: "Temporary error while sending Telegram acknowledgement; please retry.");
+        }
+    }
+
     private async Task<TelegramMessageIngestionResult> PersistMessageLogCoreAsync(
         NormalizedTelegramMessageEnvelope envelope,
         TelegramGroupAuthorizationResult groupAuthorization,
@@ -315,18 +560,22 @@ public sealed class TelegramMessageIngestionService : ITelegramMessageIngestionS
 
             if (existing is not null)
             {
-                bool needsRecovery = initialStatus == MessageProcessingStatus.Received &&
-                                     existing.CanStartOrRecoverProcessing(nowUtc, _staleProcessingTimeout);
+                bool needsActivityRecovery = initialStatus == MessageProcessingStatus.Received &&
+                                             existing.CanStartOrRecoverProcessing(nowUtc, _staleProcessingTimeout);
+                bool needsAckRecovery = initialStatus == MessageProcessingStatus.Received &&
+                                        !needsActivityRecovery &&
+                                        existing.CanSendOrRecoverAcknowledgement(nowUtc, _staleProcessingTimeout);
 
                 return new TelegramMessageIngestionResult(
                     IsPersistedOrDuplicate: true,
-                    IsDuplicate: !needsRecovery,
+                    IsDuplicate: !needsActivityRecovery && !needsAckRecovery,
                     TelegramMessageLogId: existing.TelegramMessageLogId,
                     ProcessingStatus: existing.ProcessingStatus,
                     ReceivedAtUtc: existing.ReceivedAtUtc,
                     ErrorCode: null,
                     ErrorMessage: null,
-                    RequiresActivityProcessing: needsRecovery);
+                    RequiresActivityProcessing: needsActivityRecovery,
+                    RequiresAcknowledgementDelivery: needsAckRecovery);
             }
 
             // 2. Build new TelegramMessageLog audit record
@@ -422,6 +671,25 @@ public sealed class TelegramMessageIngestionService : ITelegramMessageIngestionS
         }
     }
 
+    private async Task<bool> TryClaimAcknowledgementForSendingAsync(
+        TelegramMessageLog log,
+        DateTime startedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        log.MarkAcknowledgementSending(startedAtUtc);
+
+        try
+        {
+            await SaveChangesInSavepointOrTransactionAsync(AckClaimSavepointName, cancellationToken);
+            return true;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            _dbContext.Entry(log).State = EntityState.Detached;
+            return false;
+        }
+    }
+
     private async Task TryMarkMessageFailedAsync(
         long telegramMessageLogId,
         CancellationToken cancellationToken)
@@ -443,6 +711,35 @@ public sealed class TelegramMessageIngestionService : ITelegramMessageIngestionS
         {
             _logger.LogWarning(
                 "Could not update TelegramMessageLog {LogId} status to FailedError after processing failure: {Reason}",
+                telegramMessageLogId,
+                ex.GetType().Name);
+        }
+    }
+
+    private async Task TryMarkAcknowledgementFailedRetryableAsync(
+        long telegramMessageLogId,
+        string sanitizedReason,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            _dbContext.ChangeTracker.Clear();
+
+            var log = await _dbContext.TelegramMessageLogs
+                .SingleOrDefaultAsync(x => x.TelegramMessageLogId == telegramMessageLogId, cancellationToken);
+
+            if (log is not null &&
+                log.RequiresAcknowledgement &&
+                log.AcknowledgementStatus != AcknowledgementDeliveryStatus.Delivered)
+            {
+                log.MarkAcknowledgementFailedRetryable(Truncate(sanitizedReason, 500));
+                await SaveChangesInSavepointOrTransactionAsync(AckCompleteSavepointName, cancellationToken);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Could not update TelegramMessageLog {LogId} AcknowledgementStatus to FailedRetryable: {Reason}",
                 telegramMessageLogId,
                 ex.GetType().Name);
         }

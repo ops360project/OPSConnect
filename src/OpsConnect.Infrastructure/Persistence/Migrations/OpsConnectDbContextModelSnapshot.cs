@@ -1373,6 +1373,33 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("TelegramMessageLogId"));
 
+                    b.Property<int>("AcknowledgementAttemptCount")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("AcknowledgementDeliveredAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("AcknowledgementLastError")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<string>("AcknowledgementMessageText")
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
+
+                    b.Property<int?>("AcknowledgementRetryAfterSeconds")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("AcknowledgementSendingStartedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("AcknowledgementStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)")
+                        .HasDefaultValue("NotApplicable");
+
                     b.Property<int?>("ActivityId")
                         .HasColumnType("int");
 
