@@ -113,6 +113,119 @@ public sealed class TelegramBotHttpClient : ITelegramBotClient
         return await PostTelegramRequestAsync(endpoint, payload, options, cancellationToken);
     }
 
+    public async Task<TelegramWebhookInfoResult> GetWebhookInfoAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var options = _optionsMonitor.CurrentValue;
+        if (TelegramSecretMasker.IsMissingOrPlaceholder(options.BotToken))
+        {
+            return new TelegramWebhookInfoResult(
+                IsSuccess: false,
+                HttpStatusCode: null,
+                ErrorMessage: "Telegram BotToken is not configured.",
+                IsConfigured: false,
+                Url: null,
+                HasCustomCertificate: null,
+                PendingUpdateCount: null,
+                LastErrorDateUtc: null,
+                LastErrorMessage: null);
+        }
+
+        var endpoint = $"https://api.telegram.org/bot{options.BotToken!.Trim()}/getWebhookInfo";
+
+        try
+        {
+            using var response = await _httpClient.GetAsync(endpoint, cancellationToken);
+            int statusCode = (int)response.StatusCode;
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            var sanitizedBody = TelegramSecretMasker.SanitizeForLogging(body, options.BotToken, options.WebhookSecretToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Telegram getWebhookInfo API call returned HTTP {StatusCode}: {SanitizedResponse}",
+                    statusCode,
+                    sanitizedBody);
+
+                return new TelegramWebhookInfoResult(
+                    IsSuccess: false,
+                    HttpStatusCode: statusCode,
+                    ErrorMessage: $"Telegram Bot API returned HTTP {statusCode}.",
+                    IsConfigured: false,
+                    Url: null,
+                    HasCustomCertificate: null,
+                    PendingUpdateCount: null,
+                    LastErrorDateUtc: null,
+                    LastErrorMessage: null);
+            }
+
+            var parsed = JsonSerializer.Deserialize<TelegramWebhookInfoResponse>(body);
+            if (parsed is null || !parsed.Ok || parsed.Result is null)
+            {
+                return new TelegramWebhookInfoResult(
+                    IsSuccess: false,
+                    HttpStatusCode: statusCode,
+                    ErrorMessage: "Telegram Bot API response was malformed or indicated failure.",
+                    IsConfigured: false,
+                    Url: null,
+                    HasCustomCertificate: null,
+                    PendingUpdateCount: null,
+                    LastErrorDateUtc: null,
+                    LastErrorMessage: null);
+            }
+
+            var data = parsed.Result;
+            bool isConfigured = !string.IsNullOrWhiteSpace(data.Url);
+            DateTime? lastErrorUtc = data.LastErrorDate.HasValue && data.LastErrorDate.Value > 0
+                ? DateTimeOffset.FromUnixTimeSeconds(data.LastErrorDate.Value).UtcDateTime
+                : null;
+            string? sanitizedLastError = string.IsNullOrWhiteSpace(data.LastErrorMessage)
+                ? null
+                : TelegramSecretMasker.SanitizeForLogging(data.LastErrorMessage, options.BotToken, options.WebhookSecretToken);
+
+            return new TelegramWebhookInfoResult(
+                IsSuccess: true,
+                HttpStatusCode: statusCode,
+                ErrorMessage: null,
+                IsConfigured: isConfigured,
+                Url: data.Url,
+                HasCustomCertificate: data.HasCustomCertificate,
+                PendingUpdateCount: data.PendingUpdateCount,
+                LastErrorDateUtc: lastErrorUtc,
+                LastErrorMessage: sanitizedLastError);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("Telegram getWebhookInfo request timed out.");
+            return new TelegramWebhookInfoResult(
+                IsSuccess: false,
+                HttpStatusCode: null,
+                ErrorMessage: "Telegram Bot API request timed out.",
+                IsConfigured: false,
+                Url: null,
+                HasCustomCertificate: null,
+                PendingUpdateCount: null,
+                LastErrorDateUtc: null,
+                LastErrorMessage: null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            var sanitizedError = TelegramSecretMasker.SanitizeForLogging(ex.Message, options.BotToken, options.WebhookSecretToken);
+            _logger.LogError(ex, "Failed to connect to Telegram getWebhookInfo: {SanitizedError}", sanitizedError);
+
+            return new TelegramWebhookInfoResult(
+                IsSuccess: false,
+                HttpStatusCode: null,
+                ErrorMessage: $"Connection to Telegram Bot API failed: {sanitizedError}",
+                IsConfigured: false,
+                Url: null,
+                HasCustomCertificate: null,
+                PendingUpdateCount: null,
+                LastErrorDateUtc: null,
+                LastErrorMessage: null);
+        }
+    }
+
     private async Task<TelegramBotSendResult> PostTelegramRequestAsync(
         string endpointUrl,
         object payload,
@@ -276,5 +389,35 @@ public sealed class TelegramBotHttpClient : ITelegramBotClient
     {
         [JsonPropertyName("retry_after")]
         public int? RetryAfter { get; set; }
+    }
+
+    private sealed class TelegramWebhookInfoResponse
+    {
+        [JsonPropertyName("ok")]
+        public bool Ok { get; set; }
+
+        [JsonPropertyName("result")]
+        public TelegramWebhookInfoData? Result { get; set; }
+
+        [JsonPropertyName("description")]
+        public string? Description { get; set; }
+    }
+
+    private sealed class TelegramWebhookInfoData
+    {
+        [JsonPropertyName("url")]
+        public string? Url { get; set; }
+
+        [JsonPropertyName("has_custom_certificate")]
+        public bool HasCustomCertificate { get; set; }
+
+        [JsonPropertyName("pending_update_count")]
+        public int PendingUpdateCount { get; set; }
+
+        [JsonPropertyName("last_error_date")]
+        public long? LastErrorDate { get; set; }
+
+        [JsonPropertyName("last_error_message")]
+        public string? LastErrorMessage { get; set; }
     }
 }

@@ -152,6 +152,13 @@ public class TelegramWebhookIntegrationTests
             groupAuthService,
             ingestionService);
 
+        var monitoringService = new TelegramOperationalMonitoringService(
+            dbContext,
+            optionsMonitor,
+            botClient,
+            effectiveClock,
+            NullLogger<TelegramOperationalMonitoringService>.Instance);
+
         var httpContext = new DefaultHttpContext
         {
             User = user ?? new ClaimsPrincipal(new ClaimsIdentity())
@@ -166,7 +173,7 @@ public class TelegramWebhookIntegrationTests
         httpContext.Request.ContentLength = bodyBytes.Length;
         httpContext.Request.ContentType = "application/json";
 
-        return new TelegramWebhookController(receiver, optionsMonitor)
+        return new TelegramWebhookController(receiver, optionsMonitor, monitoringService)
         {
             ControllerContext = new ControllerContext
             {
@@ -1573,6 +1580,33 @@ public class TelegramWebhookIntegrationTests
         public Task<TelegramBotSendResult> DeleteWebhookAsync(
             CancellationToken cancellationToken = default) =>
             Task.FromResult(new TelegramBotSendResult(true, null, 200, null));
+
+        private Func<Task<TelegramWebhookInfoResult>>? _webhookInfoHandler;
+
+        public void SetWebhookInfoHandler(Func<Task<TelegramWebhookInfoResult>>? handler)
+        {
+            _webhookInfoHandler = handler;
+        }
+
+        public async Task<TelegramWebhookInfoResult> GetWebhookInfoAsync(
+            CancellationToken cancellationToken = default)
+        {
+            if (_webhookInfoHandler is not null)
+            {
+                return await _webhookInfoHandler();
+            }
+
+            return new TelegramWebhookInfoResult(
+                IsSuccess: true,
+                HttpStatusCode: 200,
+                ErrorMessage: null,
+                IsConfigured: true,
+                Url: "https://opsconnect.example.com/api/telegram/webhook",
+                HasCustomCertificate: false,
+                PendingUpdateCount: 0,
+                LastErrorDateUtc: null,
+                LastErrorMessage: null);
+        }
     }
 
     private sealed class ScriptedTelegramHttpMessageHandler : HttpMessageHandler

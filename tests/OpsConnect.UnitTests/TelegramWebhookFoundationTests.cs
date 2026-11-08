@@ -432,4 +432,34 @@ public class TelegramWebhookFoundationTests
         Assert.DoesNotContain(ValidSecret, formatted, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("99:99", formatted, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void TelegramSecretMasker_SanitizeForLogging_ShouldMaskBotTokensAndSecretsInTextAndUrls()
+    {
+        string rawText = $"Failed to connect to https://api.telegram.org/bot{ValidBotToken}/sendMessage with secret {ValidSecret}";
+        string sanitized = TelegramSecretMasker.SanitizeForLogging(rawText, ValidBotToken, ValidSecret);
+
+        Assert.DoesNotContain(ValidBotToken, sanitized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(ValidSecret, sanitized, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains($"bot{TelegramSecretMasker.MaskedPlaceholder}", sanitized, StringComparison.Ordinal);
+        Assert.Contains(TelegramSecretMasker.MaskedPlaceholder, sanitized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TelegramOperationalDiagnosticsQuery_Bounds_ShouldEnforceClamping()
+    {
+        var minQuery = new TelegramOperationalDiagnosticsQuery(TimeWindowMinutes: 1, RecentErrorsLimit: 0);
+        int clampedWindow = Math.Clamp(minQuery.TimeWindowMinutes, TelegramOperationalDiagnosticsQuery.MinTimeWindowMinutes, TelegramOperationalDiagnosticsQuery.MaxTimeWindowMinutes);
+        int clampedLimit = Math.Clamp(minQuery.RecentErrorsLimit, TelegramOperationalDiagnosticsQuery.MinErrorsLimit, TelegramOperationalDiagnosticsQuery.MaxErrorsLimit);
+
+        Assert.Equal(TelegramOperationalDiagnosticsQuery.MinTimeWindowMinutes, clampedWindow);
+        Assert.Equal(TelegramOperationalDiagnosticsQuery.MinErrorsLimit, clampedLimit);
+
+        var maxQuery = new TelegramOperationalDiagnosticsQuery(TimeWindowMinutes: 100_000, RecentErrorsLimit: 500);
+        int clampedMaxWindow = Math.Clamp(maxQuery.TimeWindowMinutes, TelegramOperationalDiagnosticsQuery.MinTimeWindowMinutes, TelegramOperationalDiagnosticsQuery.MaxTimeWindowMinutes);
+        int clampedMaxLimit = Math.Clamp(maxQuery.RecentErrorsLimit, TelegramOperationalDiagnosticsQuery.MinErrorsLimit, TelegramOperationalDiagnosticsQuery.MaxErrorsLimit);
+
+        Assert.Equal(TelegramOperationalDiagnosticsQuery.MaxTimeWindowMinutes, clampedMaxWindow);
+        Assert.Equal(TelegramOperationalDiagnosticsQuery.MaxErrorsLimit, clampedMaxLimit);
+    }
 }

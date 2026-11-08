@@ -53,6 +53,7 @@ public static class DependencyInjection
 
         services.AddScoped<ITelegramGroupAuthorizationService, TelegramGroupAuthorizationService>();
         services.AddScoped<ITelegramMessageIngestionService, TelegramMessageIngestionService>();
+        services.AddScoped<ITelegramOperationalMonitoringService, TelegramOperationalMonitoringService>();
         services.AddHttpClient<ITelegramBotClient, TelegramBotHttpClient>();
 
         return services;

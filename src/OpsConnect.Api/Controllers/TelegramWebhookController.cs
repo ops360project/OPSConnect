@@ -14,13 +14,16 @@ public class TelegramWebhookController : ControllerBase
 {
     private readonly ITelegramWebhookReceiver _webhookReceiver;
     private readonly IOptionsMonitor<TelegramBotOptions> _optionsMonitor;
+    private readonly ITelegramOperationalMonitoringService? _monitoringService;
 
     public TelegramWebhookController(
         ITelegramWebhookReceiver webhookReceiver,
-        IOptionsMonitor<TelegramBotOptions> optionsMonitor)
+        IOptionsMonitor<TelegramBotOptions> optionsMonitor,
+        ITelegramOperationalMonitoringService? monitoringService = null)
     {
         _webhookReceiver = webhookReceiver;
         _optionsMonitor = optionsMonitor;
+        _monitoringService = monitoringService;
     }
 
     /// <summary>
@@ -105,6 +108,123 @@ public class TelegramWebhookController : ControllerBase
         }
 
         var diagnostics = _webhookReceiver.GetMaskedConfigurationDiagnostics();
+        return Ok(diagnostics);
+    }
+
+    /// <summary>
+    /// Health check endpoint for API availability, SQL Server database connectivity,
+    /// Telegram bot configuration validity, and Telegram Bot API connectivity.
+    /// Does not expose secrets, connection strings, or sensitive tokens.
+    /// </summary>
+    [HttpGet("health")]
+    [AllowAnonymous]
+    [ProducesResponseType(typeof(TelegramHealthReportDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(TelegramHealthReportDto), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<ActionResult<TelegramHealthReportDto>> GetHealth(
+        [FromQuery] bool verifyExternalApi = false,
+        CancellationToken cancellationToken = default)
+    {
+        if (_monitoringService is null)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new TelegramHealthReportDto(
+                CheckedAtUtc: DateTime.UtcNow,
+                Status: IntegrationHealthStatus.Degraded,
+                Description: "Monitoring service is not configured.",
+                Components: Array.Empty<TelegramComponentHealthDto>()));
+        }
+
+        var report = await _monitoringService.CheckHealthAsync(verifyExternalApi, cancellationToken);
+        return report.Status == IntegrationHealthStatus.Unhealthy
+            ? StatusCode(StatusCodes.Status503ServiceUnavailable, report)
+            : Ok(report);
+    }
+
+    /// <summary>
+    /// Operational status summary endpoint for administrators and viewers.
+    /// Exposes active group counts, recent activity timestamps, and acknowledgement delivery statistics.
+    /// </summary>
+    [HttpGet("operational-status")]
+    [HttpGet("status")]
+    [Authorize(Policy = AuthorizationPolicies.ActivityRead)]
+    [ProducesResponseType(typeof(TelegramOperationalStatusDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<ActionResult<TelegramOperationalStatusDto>> GetOperationalStatus(
+        [FromQuery] bool verifyExternalApi = false,
+        CancellationToken cancellationToken = default)
+    {
+        if (User?.Identity?.IsAuthenticated != true || string.IsNullOrWhiteSpace(User.Identity.Name))
+        {
+            return Unauthorized(new ProblemDetails
+            {
+                Status = StatusCodes.Status401Unauthorized,
+                Title = "Authentication required.",
+                Detail = "An authenticated user identity is required."
+            });
+        }
+
+        if (!User.IsInRole(SystemRoles.SuperAdmin) &&
+            !User.IsInRole(SystemRoles.Admin) &&
+            !User.IsInRole(SystemRoles.Viewer))
+        {
+            return Forbid();
+        }
+
+        if (_monitoringService is null)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Title = "Service Unavailable",
+                Detail = "Monitoring service is not configured."
+            });
+        }
+
+        var status = await _monitoringService.GetOperationalStatusAsync(verifyExternalApi, cancellationToken);
+        return Ok(status);
+    }
+
+    /// <summary>
+    /// Operational diagnostics endpoint for administrators.
+    /// Returns aggregated metrics across a bounded time window and sanitized recent error logs.
+    /// Does not mutate state or trigger processing.
+    /// </summary>
+    [HttpGet("diagnostics")]
+    [Authorize(Policy = AuthorizationPolicies.ActivityManage)]
+    [ProducesResponseType(typeof(TelegramOperationalDiagnosticsDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<ActionResult<TelegramOperationalDiagnosticsDto>> GetOperationalDiagnostics(
+        [FromQuery] TelegramOperationalDiagnosticsQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        if (User?.Identity?.IsAuthenticated != true || string.IsNullOrWhiteSpace(User.Identity.Name))
+        {
+            return Unauthorized(new ProblemDetails
+            {
+                Status = StatusCodes.Status401Unauthorized,
+                Title = "Authentication required.",
+                Detail = "An authenticated user identity is required."
+            });
+        }
+
+        if (!User.IsInRole(SystemRoles.SuperAdmin) &&
+            !User.IsInRole(SystemRoles.Admin))
+        {
+            return Forbid();
+        }
+
+        if (_monitoringService is null)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Title = "Service Unavailable",
+                Detail = "Monitoring service is not configured."
+            });
+        }
+
+        var diagnostics = await _monitoringService.GetOperationalDiagnosticsAsync(query, cancellationToken);
         return Ok(diagnostics);
     }
 

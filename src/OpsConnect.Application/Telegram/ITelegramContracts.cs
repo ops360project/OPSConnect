@@ -43,6 +43,9 @@ public interface ITelegramBotClient
 
     Task<TelegramBotSendResult> DeleteWebhookAsync(
         CancellationToken cancellationToken = default);
+
+    Task<TelegramWebhookInfoResult> GetWebhookInfoAsync(
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -84,4 +87,22 @@ public interface ITelegramWebhookReceiver
         CancellationToken cancellationToken = default);
 
     TelegramBotMaskedDiagnosticsDto GetMaskedConfigurationDiagnostics();
+}
+
+/// <summary>
+/// Operational health checks, integration status queries, and diagnostic reporting for Telegram bot infrastructure.
+/// </summary>
+public interface ITelegramOperationalMonitoringService
+{
+    Task<TelegramHealthReportDto> CheckHealthAsync(
+        bool verifyExternalTelegramApi = false,
+        CancellationToken cancellationToken = default);
+
+    Task<TelegramOperationalStatusDto> GetOperationalStatusAsync(
+        bool verifyExternalTelegramApi = false,
+        CancellationToken cancellationToken = default);
+
+    Task<TelegramOperationalDiagnosticsDto> GetOperationalDiagnosticsAsync(
+        TelegramOperationalDiagnosticsQuery query,
+        CancellationToken cancellationToken = default);
 }
