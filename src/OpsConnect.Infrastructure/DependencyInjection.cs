@@ -5,8 +5,10 @@ using OpsConnect.Application.Activities.Common;
 using OpsConnect.Application.Activities.RFFO;
 using OpsConnect.Application.Administration;
 using OpsConnect.Application.Organisation;
+using OpsConnect.Application.Telegram;
 using OpsConnect.Infrastructure.Persistence;
 using OpsConnect.Infrastructure.Services;
+using OpsConnect.Infrastructure.Telegram;
 
 namespace OpsConnect.Infrastructure;
 
@@ -45,6 +47,56 @@ public static class DependencyInjection
         services.AddScoped<IStatusReopenPermissionService, StatusReopenPermissionService>();
         services.AddScoped<IActivityConfigurationService, ActivityConfigurationService>();
 
+        services.AddOptions<TelegramBotOptions>()
+            .Configure(options => BindTelegramBotOptions(configuration, options))
+            .ValidateOnStart();
+
+        services.AddScoped<ITelegramGroupAuthorizationService, TelegramGroupAuthorizationService>();
+        services.AddHttpClient<ITelegramBotClient, TelegramBotHttpClient>();
+
         return services;
+    }
+
+    public static void BindTelegramBotOptions(IConfiguration configuration, TelegramBotOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(options);
+
+        var section = configuration.GetSection(TelegramBotOptions.SectionName);
+        if (!section.Exists())
+        {
+            return;
+        }
+
+        if (bool.TryParse(section[nameof(TelegramBotOptions.IsEnabled)], out var isEnabled))
+        {
+            options.IsEnabled = isEnabled;
+        }
+
+        options.BotToken = section[nameof(TelegramBotOptions.BotToken)];
+        options.WebhookUrl = section[nameof(TelegramBotOptions.WebhookUrl)];
+        options.WebhookSecretToken = section[nameof(TelegramBotOptions.WebhookSecretToken)];
+
+        if (int.TryParse(section[nameof(TelegramBotOptions.MaxWebhookPayloadBytes)], out var maxBytes))
+        {
+            options.MaxWebhookPayloadBytes = maxBytes;
+        }
+
+        options.AuthorizedSourceChatIds = ReadChatIds(section.GetSection(nameof(TelegramBotOptions.AuthorizedSourceChatIds)));
+        options.DestinationChatIds = ReadChatIds(section.GetSection(nameof(TelegramBotOptions.DestinationChatIds)));
+    }
+
+    private static List<long> ReadChatIds(IConfigurationSection section)
+    {
+        var list = new List<long>();
+        foreach (var child in section.GetChildren())
+        {
+            if (long.TryParse(child.Value, out var chatId))
+            {
+                list.Add(chatId);
+            }
+        }
+
+        return list;
     }
 }
