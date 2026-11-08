@@ -147,7 +147,8 @@ public sealed record UpdateActivityReportingConfigurationRequest(
     DateOnly EffectiveFrom,
     DateOnly? EffectiveTo = null,
     string ChangedBy = "System",
-    string? ChangeReason = null)
+    string? ChangeReason = null,
+    bool AutoClosePreviousOpenPeriod = true)
 {
     public UpdateActivityReportingConfigurationRequest ValidateAndNormalize()
     {

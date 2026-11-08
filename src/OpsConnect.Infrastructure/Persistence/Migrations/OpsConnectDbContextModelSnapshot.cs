@@ -84,6 +84,11 @@ namespace OpsConnect.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("ConsumedReopenPermissionId");
 
+                    b.HasIndex("TelegramMessageLogId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_ActivityHistory_TelegramMessageLogId")
+                        .HasFilter("[TelegramMessageLogId] IS NOT NULL");
+
                     b.HasIndex("ActivityId", "BranchId", "ReportingDate", "RecordedAtUtc")
                         .HasDatabaseName("IX_ActivityHistory_Activity_Branch_Date");
 

@@ -66,6 +66,7 @@ public class DatabaseFoundationTests
     [InlineData(typeof(ReportDeliveryLog), "UX_ReportDeliveryLog_IdempotencyKey")]
     [InlineData(typeof(ReportDeliveryLog), "UX_ReportDeliveryLog_ReportId_DestinationGroupId")]
     [InlineData(typeof(ActivityReportingConfiguration), "UX_ActivityReportingConfiguration_ActivePerActivity")]
+    [InlineData(typeof(ActivityHistory), "UX_ActivityHistory_TelegramMessageLogId")]
     public void EfModel_ShouldDefineCriticalUniqueConstraints(
         Type entityType,
         string expectedIndexName)
@@ -153,6 +154,7 @@ public class DatabaseFoundationTests
         Assert.Contains(migrations, m => m.EndsWith("_HardeningCoreInvariants", StringComparison.Ordinal));
         Assert.Contains(migrations, m => m.EndsWith("_OrganisationMasterInvariants", StringComparison.Ordinal));
         Assert.Contains(migrations, m => m.EndsWith("_ActivityConfigurationInvariants", StringComparison.Ordinal));
+        Assert.Contains(migrations, m => m.EndsWith("_RffoSourceMessageIdempotency", StringComparison.Ordinal));
     }
 
     [Fact]

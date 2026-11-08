@@ -87,6 +87,12 @@ public class ActivityHistoryConfiguration : IEntityTypeConfiguration<ActivityHis
         builder.HasIndex(x => new { x.ActivityId, x.BranchId, x.ReportingDate, x.RecordedAtUtc })
             .HasDatabaseName("IX_ActivityHistory_Activity_Branch_Date");
 
+        // Filtered unique index preventing duplicate processing/history persistence of the same source Telegram message.
+        builder.HasIndex(x => x.TelegramMessageLogId)
+            .IsUnique()
+            .HasFilter("[TelegramMessageLogId] IS NOT NULL")
+            .HasDatabaseName("UX_ActivityHistory_TelegramMessageLogId");
+
         builder.HasOne(x => x.Activity)
             .WithMany(a => a.ActivityHistories)
             .HasForeignKey(x => x.ActivityId)
