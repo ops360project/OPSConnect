@@ -1,3 +1,4 @@
+using Hangfire;
 using Microsoft.AspNetCore.Authentication;
 using OpsConnect.Api.Authentication;
 using OpsConnect.Application;
@@ -19,6 +20,7 @@ builder.Services.AddAuthorization(AuthorizationPolicies.ConfigurePolicies);
 
 builder.Services.AddApplicationServices();
 builder.Services.AddInfrastructureServices(builder.Configuration);
+builder.Services.AddHangfireServices(builder.Configuration);
 
 var app = builder.Build();
 
@@ -38,6 +40,16 @@ if (app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
+
+app.UseHangfireDashboard("/hangfire", new DashboardOptions
+{
+    DashboardTitle = "OpsConnect - Background Jobs",
+    Authorization = new[]
+    {
+        new HangfireDashboardAuthorizationFilter()
+    }
+});
+
 app.MapControllers();
 
 app.Run();
