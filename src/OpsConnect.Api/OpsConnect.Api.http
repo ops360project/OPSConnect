@@ -1,6 +1,119 @@
-@OpsConnect.Api_HostAddress = http://localhost:5097
+@OpsConnect_Api_HostAddress = http://localhost:5097
+@ApiKey = OpsConnect-LocalDev-ApiKey
 
-GET {{OpsConnect.Api_HostAddress}}/weatherforecast/
+### Health Check
+GET {{OpsConnect_Api_HostAddress}}/api/health
 Accept: application/json
 
-###
+### List Configured Branches (Organisation Read)
+GET {{OpsConnect_Api_HostAddress}}/api/branches?isActive=true
+Accept: application/json
+X-OpsConnect-Api-Key: {{ApiKey}}
+X-OpsConnect-User: ops.viewer
+X-OpsConnect-Role: Viewer
+
+### Retrieve Organisation Hierarchy Tree
+GET {{OpsConnect_Api_HostAddress}}/api/hierarchy?includeInactive=false
+Accept: application/json
+X-OpsConnect-Api-Key: {{ApiKey}}
+X-OpsConnect-User: ops.viewer
+X-OpsConnect-Role: Viewer
+
+### Submit RFFO Activity Update
+POST {{OpsConnect_Api_HostAddress}}/api/activities/submissions
+Content-Type: application/json
+X-OpsConnect-Api-Key: {{ApiKey}}
+X-OpsConnect-User: ops.admin
+X-OpsConnect-Role: Admin
+
+{
+  "activityCode": "RFFO",
+  "rawMessageText": "Activity : RFFO\nBranch Code : 36:01\nStatus : Pending",
+  "telegramMessageLogId": 10001,
+  "telegramUserId": 9001,
+  "senderUsername": "branch3601_user",
+  "senderDisplayName": "Branch 36:01 Operator"
+}
+
+### Retrieve Daily RFFO Status & Population Summary
+GET {{OpsConnect_Api_HostAddress}}/api/activities/RFFO/status
+Accept: application/json
+X-OpsConnect-Api-Key: {{ApiKey}}
+X-OpsConnect-User: ops.viewer
+X-OpsConnect-Role: Viewer
+
+### Retrieve Branch Current Status
+GET {{OpsConnect_Api_HostAddress}}/api/activities/RFFO/branches/36:01/status
+Accept: application/json
+X-OpsConnect-Api-Key: {{ApiKey}}
+X-OpsConnect-User: ops.viewer
+X-OpsConnect-Role: Viewer
+
+### Retrieve Branch Status History
+GET {{OpsConnect_Api_HostAddress}}/api/activities/RFFO/branches/36:01/history
+Accept: application/json
+X-OpsConnect-Api-Key: {{ApiKey}}
+X-OpsConnect-User: ops.viewer
+X-OpsConnect-Role: Viewer
+
+### Grant Reopen Permission (Admin Only)
+POST {{OpsConnect_Api_HostAddress}}/api/activities/reopen-permissions
+Content-Type: application/json
+X-OpsConnect-Api-Key: {{ApiKey}}
+X-OpsConnect-User: ops.admin
+X-OpsConnect-Role: Admin
+
+{
+  "activityCode": "RFFO",
+  "branchCode": "36:01",
+  "reason": "Branch reported accidental premature completion"
+}
+
+### List Reopen Permissions
+GET {{OpsConnect_Api_HostAddress}}/api/activities/reopen-permissions?activityCode=RFFO
+Accept: application/json
+X-OpsConnect-Api-Key: {{ApiKey}}
+X-OpsConnect-User: ops.viewer
+X-OpsConnect-Role: Viewer
+
+### List Activities
+GET {{OpsConnect_Api_HostAddress}}/api/activities?includeInactive=true
+Accept: application/json
+X-OpsConnect-Api-Key: {{ApiKey}}
+X-OpsConnect-User: ops.viewer
+X-OpsConnect-Role: Viewer
+
+### Retrieve Activity Details & Settings
+GET {{OpsConnect_Api_HostAddress}}/api/activities/RFFO
+Accept: application/json
+X-OpsConnect-Api-Key: {{ApiKey}}
+X-OpsConnect-User: ops.viewer
+X-OpsConnect-Role: Viewer
+
+### Retrieve Effective Reporting Schedule & History
+GET {{OpsConnect_Api_HostAddress}}/api/activities/RFFO/reporting-schedule
+Accept: application/json
+X-OpsConnect-Api-Key: {{ApiKey}}
+X-OpsConnect-User: ops.viewer
+X-OpsConnect-Role: Viewer
+
+### Preview Calculated Daily Reporting Slots
+POST {{OpsConnect_Api_HostAddress}}/api/activities/reporting-slots/preview
+Content-Type: application/json
+X-OpsConnect-Api-Key: {{ApiKey}}
+X-OpsConnect-User: ops.viewer
+X-OpsConnect-Role: Viewer
+
+{
+  "reportingStartTime": "09:00:00",
+  "reportingEndTime": "18:00:00",
+  "reportingIntervalMinutes": 30,
+  "timeZoneId": "Asia/Kolkata"
+}
+
+### Retrieve Configuration Audit History
+GET {{OpsConnect_Api_HostAddress}}/api/configuration-history
+Accept: application/json
+X-OpsConnect-Api-Key: {{ApiKey}}
+X-OpsConnect-User: ops.viewer
+X-OpsConnect-Role: Viewer

@@ -44,6 +44,12 @@ public interface IActivityStatusQueryService
         ActivityStatusFilterQuery? query = null,
         CancellationToken cancellationToken = default);
 
+    Task<BranchActivityStatusItemDto?> GetBranchCurrentStatusAsync(
+        string activityCode,
+        string branchCode,
+        DateOnly? reportingDate = null,
+        CancellationToken cancellationToken = default);
+
     Task<BranchActivityHistoryResultDto?> GetBranchActivityHistoryAsync(
         string activityCode,
         string branchCode,

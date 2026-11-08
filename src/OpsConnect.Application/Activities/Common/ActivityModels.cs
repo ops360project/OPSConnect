@@ -16,7 +16,8 @@ public sealed record RawActivityMessageSubmissionRequest(
     string? SenderUsername = null,
     string? SenderDisplayName = null,
     DateTime? OccurredAtUtc = null,
-    DateOnly? ExplicitReportingDate = null);
+    DateOnly? ExplicitReportingDate = null,
+    string? ExpectedActivityCode = null);
 
 /// <summary>
 /// Validated, normalized command dispatched by IActivityUpdateProcessor to a pluggable IActivityUpdateHandler.
@@ -89,17 +90,33 @@ public sealed record ActivityStatusFilterQuery(
     string? StateCode = null,
     string? RegionCode = null,
     BranchActivityStatus? Status = null,
-    string? SearchTerm = null)
+    string? SearchTerm = null,
+    string? BranchCode = null,
+    int? Page = null,
+    int? PageSize = null)
 {
-    public ActivityStatusFilterQuery Normalize() =>
-        this with
+    public ActivityStatusFilterQuery Normalize()
+    {
+        if (Page.HasValue && Page.Value < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(Page), "Page must be at least 1.");
+        }
+
+        if (PageSize.HasValue && (PageSize.Value < 1 || PageSize.Value > 500))
+        {
+            throw new ArgumentOutOfRangeException(nameof(PageSize), "PageSize must be between 1 and 500.");
+        }
+
+        return this with
         {
             ActivityCode = ActivityMaster.ValidateActivityCode(ActivityCode),
             ZoneCode = string.IsNullOrWhiteSpace(ZoneCode) ? null : OrganisationCodeNormalizer.NormalizeCode(ZoneCode, nameof(ZoneCode)),
             StateCode = string.IsNullOrWhiteSpace(StateCode) ? null : OrganisationCodeNormalizer.NormalizeCode(StateCode, nameof(StateCode)),
             RegionCode = string.IsNullOrWhiteSpace(RegionCode) ? null : OrganisationCodeNormalizer.NormalizeCode(RegionCode, nameof(RegionCode)),
+            BranchCode = string.IsNullOrWhiteSpace(BranchCode) ? null : OrganisationCodeNormalizer.NormalizeAndValidateBranchCode(BranchCode, nameof(BranchCode)),
             SearchTerm = string.IsNullOrWhiteSpace(SearchTerm) ? null : SearchTerm.Trim()
         };
+    }
 }
 
 /// <summary>

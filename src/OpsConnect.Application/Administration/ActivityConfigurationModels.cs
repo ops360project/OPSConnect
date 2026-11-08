@@ -177,6 +177,58 @@ public sealed record UpdateActivityReportingConfigurationRequest(
     }
 }
 
+public sealed record SetActivityActiveStateRequest(
+    string ActivityCode,
+    bool IsActive,
+    string ChangedBy = "System",
+    string? ChangeReason = null)
+{
+    public SetActivityActiveStateRequest ValidateAndNormalize()
+    {
+        var normalizedCode = ActivityMaster.ValidateActivityCode(ActivityCode);
+
+        if (string.IsNullOrWhiteSpace(ChangedBy))
+        {
+            throw new ArgumentException("ChangedBy administrator identity is required.", nameof(ChangedBy));
+        }
+
+        return new SetActivityActiveStateRequest(
+            ActivityCode: normalizedCode,
+            IsActive: IsActive,
+            ChangedBy: ChangedBy.Trim(),
+            ChangeReason: string.IsNullOrWhiteSpace(ChangeReason) ? null : ChangeReason.Trim());
+    }
+}
+
+public sealed record PreviewReportingSlotsRequest(
+    TimeOnly ReportingStartTime,
+    TimeOnly ReportingEndTime,
+    int ReportingIntervalMinutes,
+    string TimeZoneId = ActivityReportingConfiguration.DefaultTimeZoneId)
+{
+    public PreviewReportingSlotsRequest ValidateAndNormalize()
+    {
+        ActivityReportingConfiguration.ValidateSchedule(
+            ReportingStartTime,
+            ReportingEndTime,
+            ReportingIntervalMinutes,
+            TimeZoneId);
+
+        return this with
+        {
+            TimeZoneId = TimeZoneId.Trim()
+        };
+    }
+}
+
+public sealed record ReportingSlotsPreviewResultDto(
+    TimeOnly ReportingStartTime,
+    TimeOnly ReportingEndTime,
+    int ReportingIntervalMinutes,
+    string TimeZoneId,
+    int TotalSlotsCount,
+    IReadOnlyList<TimeOnly> CalculatedDailySlotTimes);
+
 public sealed record ConfigurationHistoryEntryDto(
     long ConfigurationHistoryId,
     string EntityName,

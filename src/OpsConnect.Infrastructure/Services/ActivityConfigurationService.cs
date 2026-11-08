@@ -164,6 +164,66 @@ public sealed class ActivityConfigurationService : IActivityConfigurationService
         }, cancellationToken);
     }
 
+    public async Task<ActivityConfigurationOperationResult> SetActivityActiveStateAsync(
+        SetActivityActiveStateRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var normalized = request.ValidateAndNormalize();
+
+        return await ExecuteInTransactionAsync(async () =>
+        {
+            var existing = await _dbContext.Activities
+                .SingleOrDefaultAsync(a => a.ActivityCode == normalized.ActivityCode, cancellationToken);
+
+            if (existing is null)
+            {
+                return new ActivityConfigurationOperationResult(
+                    IsSuccess: false,
+                    ErrorCode: "ActivityNotFound",
+                    ErrorMessage: $"Activity '{normalized.ActivityCode}' was not found.",
+                    Activity: null);
+            }
+
+            var nowUtc = _businessClock.UtcNow;
+            var previousJson = SerializeActivitySnapshot(existing);
+            var actionType = normalized.IsActive ? "Enable" : "Disable";
+
+            existing.UpdateDetails(
+                activityCode: existing.ActivityCode,
+                activityName: existing.ActivityName,
+                description: existing.Description,
+                configurationJson: existing.ConfigurationJson,
+                isActive: normalized.IsActive,
+                updatedBy: normalized.ChangedBy,
+                updatedAtUtc: nowUtc);
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            var auditEntry = new ConfigurationHistory
+            {
+                EntityName = nameof(ActivityMaster),
+                EntityKey = existing.ActivityCode,
+                ActionType = actionType,
+                PreviousValueJson = previousJson,
+                NewValueJson = SerializeActivitySnapshot(existing),
+                ChangeReason = normalized.ChangeReason ?? $"{actionType} activity {existing.ActivityCode}",
+                ChangedBy = normalized.ChangedBy,
+                ChangedAtUtc = nowUtc
+            };
+
+            _dbContext.ConfigurationHistories.Add(auditEntry);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            var detailsDto = await BuildActivityDetailsDtoAsync(existing, null, cancellationToken);
+            return new ActivityConfigurationOperationResult(
+                IsSuccess: true,
+                ErrorCode: null,
+                ErrorMessage: null,
+                Activity: detailsDto);
+        }, cancellationToken);
+    }
+
     public async Task<ActivityConfigurationOperationResult> SetActivityConfigurationValueAsync(
         SetActivityKeyValueConfigRequest request,
         CancellationToken cancellationToken = default)
@@ -470,6 +530,32 @@ public sealed class ActivityConfigurationService : IActivityConfigurationService
         return entries.Select(MapAuditEntryToDto).ToList();
     }
 
+    public ReportingSlotsPreviewResultDto PreviewReportingSlots(PreviewReportingSlotsRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var normalized = request.ValidateAndNormalize();
+
+        var previewConfig = ActivityReportingConfiguration.Create(
+            activityId: 1,
+            reportingStartTime: normalized.ReportingStartTime,
+            reportingEndTime: normalized.ReportingEndTime,
+            reportingIntervalMinutes: normalized.ReportingIntervalMinutes,
+            timeZoneId: normalized.TimeZoneId,
+            isReportingEnabled: true,
+            stopWhenAllCompleted: true,
+            effectiveFrom: new DateOnly(2026, 1, 1));
+
+        var slots = previewConfig.CalculateDailySlotTimes();
+
+        return new ReportingSlotsPreviewResultDto(
+            ReportingStartTime: normalized.ReportingStartTime,
+            ReportingEndTime: normalized.ReportingEndTime,
+            ReportingIntervalMinutes: normalized.ReportingIntervalMinutes,
+            TimeZoneId: normalized.TimeZoneId,
+            TotalSlotsCount: slots.Count,
+            CalculatedDailySlotTimes: slots);
+    }
+
     private async Task<ActivityDetailsDto> BuildActivityDetailsDtoAsync(
         ActivityMaster activity,
         DateOnly? asOfReportingDate,
@@ -480,19 +566,22 @@ public sealed class ActivityConfigurationService : IActivityConfigurationService
             asOfReportingDate,
             cancellationToken);
 
-        var settings = await _dbContext.ActivityConfigurations
+        var rawSettings = await _dbContext.ActivityConfigurations
             .AsNoTracking()
             .Where(s => s.ActivityId == activity.ActivityId)
             .OrderBy(s => s.ConfigKey)
+            .ToListAsync(cancellationToken);
+
+        var settings = rawSettings
             .Select(s => new ActivityKeyValueConfigDto(
                 s.ActivityConfigurationId,
                 s.ActivityId,
                 s.ConfigKey,
-                s.ConfigValue,
+                MaskIfSensitive(s.ConfigKey, s.ConfigValue),
                 s.Description,
                 s.CreatedAtUtc,
                 s.UpdatedAtUtc))
-            .ToListAsync(cancellationToken);
+            .ToList();
 
         return new ActivityDetailsDto(
             ActivityId: activity.ActivityId,
@@ -600,9 +689,31 @@ public sealed class ActivityConfigurationService : IActivityConfigurationService
             c.ActivityConfigurationId,
             c.ActivityId,
             c.ConfigKey,
-            c.ConfigValue,
+            ConfigValue = MaskIfSensitive(c.ConfigKey, c.ConfigValue),
             c.Description
         });
+
+    private static string MaskIfSensitive(string configKey, string configValue)
+    {
+        if (string.IsNullOrWhiteSpace(configKey))
+        {
+            return configValue;
+        }
+
+        string upper = configKey.ToUpperInvariant();
+        if (upper.Contains("SECRET", StringComparison.Ordinal) ||
+            upper.Contains("PASSWORD", StringComparison.Ordinal) ||
+            upper.Contains("TOKEN", StringComparison.Ordinal) ||
+            upper.Contains("APIKEY", StringComparison.Ordinal) ||
+            upper.Contains("API_KEY", StringComparison.Ordinal) ||
+            upper.Contains("CREDENTIAL", StringComparison.Ordinal) ||
+            upper.Contains("PRIVATE_KEY", StringComparison.Ordinal))
+        {
+            return "***MASKED***";
+        }
+
+        return configValue;
+    }
 
     private static string SerializeReportingConfigSnapshot(ActivityReportingConfiguration c) =>
         JsonSerializer.Serialize(new

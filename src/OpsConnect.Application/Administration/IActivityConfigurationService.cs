@@ -19,6 +19,10 @@ public interface IActivityConfigurationService
         UpsertActivityMasterRequest request,
         CancellationToken cancellationToken = default);
 
+    Task<ActivityConfigurationOperationResult> SetActivityActiveStateAsync(
+        SetActivityActiveStateRequest request,
+        CancellationToken cancellationToken = default);
+
     Task<ActivityConfigurationOperationResult> SetActivityConfigurationValueAsync(
         SetActivityKeyValueConfigRequest request,
         CancellationToken cancellationToken = default);
@@ -31,6 +35,9 @@ public interface IActivityConfigurationService
     Task<ReportingConfigurationUpdateResult> UpdateReportingConfigurationAsync(
         UpdateActivityReportingConfigurationRequest request,
         CancellationToken cancellationToken = default);
+
+    ReportingSlotsPreviewResultDto PreviewReportingSlots(
+        PreviewReportingSlotsRequest request);
 
     Task<IReadOnlyList<ConfigurationHistoryEntryDto>> GetConfigurationHistoryAsync(
         string? entityName = null,

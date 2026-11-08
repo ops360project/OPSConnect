@@ -111,6 +111,36 @@ public sealed class ActivityUpdateProcessor : IActivityUpdateProcessor
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        string? normalizedExpectedActivityCode = null;
+        if (!string.IsNullOrWhiteSpace(request.ExpectedActivityCode))
+        {
+            try
+            {
+                normalizedExpectedActivityCode = ActivityMaster.ValidateActivityCode(request.ExpectedActivityCode);
+            }
+            catch (ArgumentException ex)
+            {
+                return new ActivityUpdateProcessingResult(
+                    IsAccepted: false,
+                    ProcessingStatus: MessageProcessingStatus.RejectedInvalidFormat,
+                    Outcome: TransitionOutcome.Rejected,
+                    ActivityCode: null,
+                    ActivityId: null,
+                    BranchCode: null,
+                    BranchId: null,
+                    ReportingDate: request.ExplicitReportingDate,
+                    PreviousStatus: null,
+                    CurrentStatus: null,
+                    DidStatusChange: false,
+                    DidConsumeReopenPermission: false,
+                    ConsumedPermissionId: null,
+                    DidReactivateReportingCycle: false,
+                    DidTriggerImmediateFinalReportCondition: false,
+                    RejectionReason: ex.Message,
+                    ReplyMessage: $"Update rejected (Invalid Activity Code): {ex.Message}");
+            }
+        }
+
         var parseResult = _messageParser.Parse(request.RawMessageText);
         if (!parseResult.IsSuccess || parseResult.ParsedMessage is null)
         {
@@ -119,7 +149,7 @@ public sealed class ActivityUpdateProcessor : IActivityUpdateProcessor
                 IsAccepted: false,
                 ProcessingStatus: MessageProcessingStatus.RejectedInvalidFormat,
                 Outcome: TransitionOutcome.Rejected,
-                ActivityCode: null,
+                ActivityCode: normalizedExpectedActivityCode,
                 ActivityId: null,
                 BranchCode: null,
                 BranchId: null,
@@ -137,6 +167,31 @@ public sealed class ActivityUpdateProcessor : IActivityUpdateProcessor
         }
 
         var parsed = parseResult.ParsedMessage;
+        if (normalizedExpectedActivityCode is not null &&
+            !string.Equals(normalizedExpectedActivityCode, parsed.ActivityCode, StringComparison.OrdinalIgnoreCase))
+        {
+            var mismatchReason =
+                $"Submitted activity code '{normalizedExpectedActivityCode}' does not match message payload activity '{parsed.ActivityCode}'.";
+            return new ActivityUpdateProcessingResult(
+                IsAccepted: false,
+                ProcessingStatus: MessageProcessingStatus.RejectedInvalidFormat,
+                Outcome: TransitionOutcome.Rejected,
+                ActivityCode: parsed.ActivityCode,
+                ActivityId: null,
+                BranchCode: parsed.BranchCode,
+                BranchId: null,
+                ReportingDate: request.ExplicitReportingDate,
+                PreviousStatus: null,
+                CurrentStatus: null,
+                DidStatusChange: false,
+                DidConsumeReopenPermission: false,
+                ConsumedPermissionId: null,
+                DidReactivateReportingCycle: false,
+                DidTriggerImmediateFinalReportCondition: false,
+                RejectionReason: mismatchReason,
+                ReplyMessage: $"Update rejected (Activity Mismatch): {mismatchReason}");
+        }
+
         var command = new ActivityUpdateSubmissionCommand(
             ActivityCode: parsed.ActivityCode,
             BranchCode: parsed.BranchCode,

@@ -58,7 +58,7 @@ public sealed class ActivityStatusQueryService : IActivityStatusQueryService
             .ToListAsync(cancellationToken))
             .ToHashSet();
 
-        var items = new List<BranchActivityStatusItemDto>(activeBranches.Count);
+        var allMappedItems = new List<BranchActivityStatusItemDto>(activeBranches.Count);
 
         foreach (var branch in activeBranches)
         {
@@ -68,40 +68,10 @@ public sealed class ActivityStatusQueryService : IActivityStatusQueryService
                 continue;
             }
 
-            if (normalizedQuery.ZoneCode is not null &&
-                !string.Equals(mapping.ZoneCode, normalizedQuery.ZoneCode, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            if (normalizedQuery.StateCode is not null &&
-                !string.Equals(mapping.StateCode, normalizedQuery.StateCode, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            if (normalizedQuery.RegionCode is not null &&
-                !string.Equals(mapping.RegionCode, normalizedQuery.RegionCode, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            if (normalizedQuery.SearchTerm is not null &&
-                !branch.BranchCode.Contains(normalizedQuery.SearchTerm, StringComparison.OrdinalIgnoreCase) &&
-                !branch.BranchName.Contains(normalizedQuery.SearchTerm, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
             bool hasRow = statusesByBranchId.TryGetValue(branch.BranchId, out var statusRow);
             var currentStatus = hasRow ? statusRow!.CurrentStatus : BranchActivityStatus.NotReported;
 
-            if (normalizedQuery.Status.HasValue && currentStatus != normalizedQuery.Status.Value)
-            {
-                continue;
-            }
-
-            items.Add(new BranchActivityStatusItemDto(
+            allMappedItems.Add(new BranchActivityStatusItemDto(
                 BranchId: branch.BranchId,
                 BranchCode: branch.BranchCode,
                 BranchName: branch.BranchName,
@@ -125,20 +95,63 @@ public sealed class ActivityStatusQueryService : IActivityStatusQueryService
                 LastUpdatedAtUtc: statusRow?.UpdatedAtUtc ?? statusRow?.CreatedAtUtc));
         }
 
-        var orderedItems = items
-            .OrderBy(i => i.ZoneCode, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(i => i.StateCode, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(i => i.RegionCode, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(i => i.BranchCode, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        int total = orderedItems.Count;
-        int completed = orderedItems.Count(i => i.CurrentStatus == BranchActivityStatus.Completed);
-        int pending = orderedItems.Count(i => i.CurrentStatus == BranchActivityStatus.Pending);
-        int notReported = orderedItems.Count(i => i.CurrentStatus == BranchActivityStatus.NotReported);
+        // Summary counts always represent the full active mapped branch population on the reporting date
+        int total = allMappedItems.Count;
+        int completed = allMappedItems.Count(i => i.CurrentStatus == BranchActivityStatus.Completed);
+        int pending = allMappedItems.Count(i => i.CurrentStatus == BranchActivityStatus.Pending);
+        int notReported = allMappedItems.Count(i => i.CurrentStatus == BranchActivityStatus.NotReported);
         decimal completionPct = total > 0
             ? Math.Round((decimal)completed * 100m / total, 2, MidpointRounding.AwayFromZero)
             : 0m;
+
+        IEnumerable<BranchActivityStatusItemDto> filtered = allMappedItems;
+
+        if (normalizedQuery.ZoneCode is not null)
+        {
+            filtered = filtered.Where(i => string.Equals(i.ZoneCode, normalizedQuery.ZoneCode, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (normalizedQuery.StateCode is not null)
+        {
+            filtered = filtered.Where(i => string.Equals(i.StateCode, normalizedQuery.StateCode, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (normalizedQuery.RegionCode is not null)
+        {
+            filtered = filtered.Where(i => string.Equals(i.RegionCode, normalizedQuery.RegionCode, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (normalizedQuery.BranchCode is not null)
+        {
+            filtered = filtered.Where(i => string.Equals(i.BranchCode, normalizedQuery.BranchCode, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (normalizedQuery.Status.HasValue)
+        {
+            filtered = filtered.Where(i => i.CurrentStatus == normalizedQuery.Status.Value);
+        }
+
+        if (normalizedQuery.SearchTerm is not null)
+        {
+            filtered = filtered.Where(i =>
+                i.BranchCode.Contains(normalizedQuery.SearchTerm, StringComparison.OrdinalIgnoreCase) ||
+                i.BranchName.Contains(normalizedQuery.SearchTerm, StringComparison.OrdinalIgnoreCase));
+        }
+
+        IEnumerable<BranchActivityStatusItemDto> orderedQuery = filtered
+            .OrderBy(i => i.ZoneCode, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(i => i.StateCode, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(i => i.RegionCode, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(i => i.BranchCode, StringComparer.OrdinalIgnoreCase);
+
+        if (normalizedQuery.Page.HasValue || normalizedQuery.PageSize.HasValue)
+        {
+            int page = normalizedQuery.Page ?? 1;
+            int pageSize = normalizedQuery.PageSize ?? 100;
+            orderedQuery = orderedQuery.Skip((page - 1) * pageSize).Take(pageSize);
+        }
+
+        var orderedItems = orderedQuery.ToList();
 
         return new ActivityDailyStatusSnapshotDto(
             ActivityId: activity.ActivityId,
@@ -152,6 +165,97 @@ public sealed class ActivityStatusQueryService : IActivityStatusQueryService
             NotReportedBranches: notReported,
             CompletionPercentage: completionPct,
             Branches: orderedItems);
+    }
+
+    public async Task<BranchActivityStatusItemDto?> GetBranchCurrentStatusAsync(
+        string activityCode,
+        string branchCode,
+        DateOnly? reportingDate = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(activityCode) || string.IsNullOrWhiteSpace(branchCode))
+        {
+            return null;
+        }
+
+        string normalizedActivityCode;
+        string normalizedBranchCode;
+        try
+        {
+            normalizedActivityCode = ActivityMaster.ValidateActivityCode(activityCode);
+            normalizedBranchCode = OrganisationCodeNormalizer.NormalizeAndValidateBranchCode(branchCode, nameof(branchCode));
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+
+        var activity = await _dbContext.Activities
+            .AsNoTracking()
+            .SingleOrDefaultAsync(a => a.ActivityCode == normalizedActivityCode, cancellationToken);
+
+        if (activity is null)
+        {
+            return null;
+        }
+
+        var branch = await _dbContext.Branches
+            .AsNoTracking()
+            .Include(b => b.Zone)
+            .Include(b => b.State)
+            .Include(b => b.Region)
+            .Include(b => b.MappingHistories)
+            .SingleOrDefaultAsync(b => b.BranchCode == normalizedBranchCode, cancellationToken);
+
+        if (branch is null)
+        {
+            return null;
+        }
+
+        var timeZoneId = await ResolveActivityTimeZoneAsync(activity.ActivityId, reportingDate, cancellationToken);
+        var effectiveDate = reportingDate ?? _businessClock.GetBusinessDate(timeZoneId);
+
+        var mapping = branch.ResolveMappingAsOf(effectiveDate);
+        var statusRow = await _dbContext.ActivityStatuses
+            .AsNoTracking()
+            .SingleOrDefaultAsync(
+                s => s.ActivityId == activity.ActivityId &&
+                     s.BranchId == branch.BranchId &&
+                     s.ReportingDate == effectiveDate,
+                cancellationToken);
+
+        bool hasAvailablePermission = await _dbContext.StatusReopenPermissions
+            .AsNoTracking()
+            .AnyAsync(
+                p => p.ActivityId == activity.ActivityId &&
+                     p.BranchId == branch.BranchId &&
+                     p.ReportingDate == effectiveDate &&
+                     p.PermissionStatus == ReopenPermissionStatus.Available,
+                cancellationToken);
+
+        bool hasRow = statusRow is not null;
+        return new BranchActivityStatusItemDto(
+            BranchId: branch.BranchId,
+            BranchCode: branch.BranchCode,
+            BranchName: branch.BranchName,
+            RegionId: mapping?.RegionId ?? branch.RegionId,
+            RegionCode: mapping?.RegionCode ?? branch.Region.RegionCode,
+            RegionName: mapping?.RegionName ?? branch.Region.RegionName,
+            StateId: mapping?.StateId ?? branch.StateId,
+            StateCode: mapping?.StateCode ?? branch.State.StateCode,
+            StateName: mapping?.StateName ?? branch.State.StateName,
+            ZoneId: mapping?.ZoneId ?? branch.ZoneId,
+            ZoneCode: mapping?.ZoneCode ?? branch.Zone.ZoneCode,
+            ZoneName: mapping?.ZoneName ?? branch.Zone.ZoneName,
+            ReportingDate: effectiveDate,
+            CurrentStatus: hasRow ? statusRow!.CurrentStatus : BranchActivityStatus.NotReported,
+            IsDerivedNotReported: !hasRow,
+            ReopenedCount: statusRow?.ReopenedCount ?? 0,
+            HasAvailableReopenPermission: hasAvailablePermission,
+            LastTelegramMessageLogId: statusRow?.LastTelegramMessageLogId,
+            LastUpdatedByTelegramUserId: statusRow?.LastUpdatedByTelegramUserId,
+            LastUpdatedByDisplayName: statusRow?.LastUpdatedByDisplayName,
+            LastUpdatedAtUtc: statusRow?.UpdatedAtUtc ?? statusRow?.CreatedAtUtc);
     }
 
     public async Task<BranchActivityHistoryResultDto?> GetBranchActivityHistoryAsync(
